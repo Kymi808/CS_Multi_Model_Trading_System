@@ -1,0 +1,122 @@
+[
+  {
+    "symbol": "SPGI",
+    "side": "buy",
+    "notional": 8365.190372166104,
+    "status": "accepted"
+  },
+  {
+    "symbol": "MSFT",
+    "side": "buy",
+    "notional": 6871.664347896889,
+    "status": "accepted"
+  },
+  {
+    "symbol": "ACN",
+    "side": "buy",
+    "notional": 10000.0,
+    "status": "accepted"
+  },
+  {
+    "symbol": "KLAC",
+    "side": "buy",
+    "notional": 2465.7301826079906,
+    "status": "accepted"
+  },
+  {
+    "symbol": "JPM",
+    "side": "buy",
+    "notional": 7392.962534772694,
+    "status": "accepted"
+  },
+  {
+    "symbol": "ANET",
+    "side": "buy",
+    "notional": 3911.0798645912605,
+    "status": "accepted"
+  },
+  {
+    "symbol": "MS",
+    "side": "buy",
+    "notional": 7244.1231582000655,
+    "status": "accepted"
+  },
+  {
+    "symbol": "HUM",
+    "side": "buy",
+    "notional": 10000.0,
+    "status": "accepted"
+  },
+  {
+    "symbol": "SCHW",
+    "side": "buy",
+    "notional": 9716.626915718767,
+    "status": "accepted"
+  },
+  {
+    "symbol": "META",
+    "side": "buy",
+    "notional": 5899.5135404192315,
+    "status": "accepted"
+  },
+  {
+    "symbol": "AXP",
+    "side": "buy",
+    "notional": 8972.275985005377,
+    "status": "accepted"
+  },
+  {
+    "symbol": "BKNG",
+    "side": "buy",
+    "notional": 8185.228822980591,
+    "status": "accepted"
+  },
+  {
+    "symbol": "BSX",
+    "side": "buy",
+    "notional": 7127.214627948066,
+    "status": "accepted"
+  },
+  {
+    "symbol": "ADI",
+    "side": "sell",
+    "notional": 8201.804683401622,
+    "status": "accepted"
+  },
+  {
+    "symbol": "TXN",
+    "side": "sell",
+    "notional": 5879.040872769995,
+    "status": "accepted"
+  },
+  {
+    "symbol": "PCAR",
+    "side": "sell",
+    "notional": 6686.634403025436,
+    "status": "accepted"
+  },
+  {
+    "symbol": "SLB",
+    "side": "sell",
+    "notional": 4028.3028253106368,
+    "status": "accepted"
+  },
+  {
+    "symbol": "CMCSA",
+    "side": "sell",
+    "notional": 5420.318343066604,
+    "status": "accepted"
+  },
+  {
+    "symbol": "PEP",
+    "side": "sell",
+    "notional": 7980.058616846616,
+    "status": "accepted"
+  },
+  {
+    "symbol": "MCHP",
+    "side": "sell",
+    "notional": 1621.0605260565558,
+    "status": "accepted"
+  }
+]
