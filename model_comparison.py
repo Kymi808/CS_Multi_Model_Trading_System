@@ -480,6 +480,7 @@ def save_comparison(
     summaries: Dict[str, dict],
     all_results: Dict[str, pd.DataFrame],
     results_dir: str,
+    suffix: str = "",
 ):
     """Save all comparison artifacts."""
     os.makedirs(results_dir, exist_ok=True)
@@ -491,7 +492,8 @@ def save_comparison(
             k: float(v) if isinstance(v, (int, float, np.floating, np.integer)) else str(v)
             for k, v in row.items()
         }
-    with open(os.path.join(results_dir, "model_comparison.json"), "w") as f:
+    sfx = f"_{suffix}" if suffix else ""
+    with open(os.path.join(results_dir, f"model_comparison{sfx}.json"), "w") as f:
         json.dump(comparison_json, f, indent=2)
 
     # Save per-model summaries
@@ -504,13 +506,13 @@ def save_comparison(
                 clean[k] = str(v)
             else:
                 clean[k] = str(v)
-        with open(os.path.join(results_dir, f"summary_{name}.json"), "w") as f:
+        with open(os.path.join(results_dir, f"summary_{name}{sfx}.json"), "w") as f:
             json.dump(clean, f, indent=2)
 
     # Save per-model returns
     for name, results_df in all_results.items():
         if not results_df.empty:
-            results_df.to_csv(os.path.join(results_dir, f"returns_{name}.csv"))
+            results_df.to_csv(os.path.join(results_dir, f"returns_{name}{sfx}.csv"))
 
     # Save comparison as CSV table
     df_rows = []
@@ -520,7 +522,7 @@ def save_comparison(
         df_rows.append(entry)
     if df_rows:
         pd.DataFrame(df_rows).to_csv(
-            os.path.join(results_dir, "comparison_table.csv"), index=False,
+            os.path.join(results_dir, f"comparison_table{sfx}.csv"), index=False,
         )
 
     logger.info(f"Comparison results saved to {results_dir}/")
@@ -530,6 +532,7 @@ def generate_comparison_plots(
     all_results: Dict[str, pd.DataFrame],
     comparison: dict,
     results_dir: str,
+    suffix: str = "",
 ):
     """Generate comparative visualization across all models."""
     import matplotlib
@@ -615,7 +618,8 @@ def generate_comparison_plots(
         axes[3].grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
-    path = os.path.join(results_dir, "model_comparison.png")
+    sfx = f"_{suffix}" if suffix else ""
+    path = os.path.join(results_dir, f"model_comparison{sfx}.png")
     plt.savefig(path, bbox_inches="tight")
     plt.close()
     logger.info(f"Comparison plot saved: {path}")

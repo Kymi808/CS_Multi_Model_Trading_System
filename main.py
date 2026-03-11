@@ -185,20 +185,26 @@ def cmd_compare(args):
     # ============================================================
     print_comparison(comparison, all_summaries)
 
+    # Build suffix for result filenames (e.g. "14L_7S" for long-biased)
+    n_l = cfg.portfolio.max_positions_long
+    n_s = cfg.portfolio.max_positions_short
+    suffix = f"{n_l}L_{n_s}S" if (n_l != 10 or n_s != 10) else ""
+
     # Save everything
-    save_comparison(comparison, all_summaries, all_results, cfg.results_dir)
+    save_comparison(comparison, all_summaries, all_results, cfg.results_dir, suffix=suffix)
 
     # Generate comparison plots
     try:
-        generate_comparison_plots(all_results, comparison, cfg.results_dir)
+        generate_comparison_plots(all_results, comparison, cfg.results_dir, suffix=suffix)
     except Exception as e:
         logger.warning(f"Comparison plotting failed: {e}")
 
     # Also generate individual plots for each model
+    sfx = f"_{suffix}" if suffix else ""
     for name, results in all_results.items():
         if not results.empty and name in all_summaries:
             try:
-                generate_plots_named(results, all_summaries[name], name, cfg.results_dir)
+                generate_plots_named(results, all_summaries[name], f"{name}{sfx}", cfg.results_dir)
             except Exception as e:
                 logger.warning(f"Plot for {name} failed: {e}")
 
