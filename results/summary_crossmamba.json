@@ -1,0 +1,14 @@
+{
+  "total_return": 0.6112386520041762,
+  "annual_return": 0.16169635847183872,
+  "annual_volatility": 0.07707713515350947,
+  "sharpe_ratio": 2.0978509018438443,
+  "sortino_ratio": 3.6120557863610676,
+  "max_drawdown": -0.05933780441321379,
+  "calmar_ratio": 2.7250137213653582,
+  "win_rate": 0.5324189526184538,
+  "profit_factor": 1.3724170243274652,
+  "n_days": 802.0,
+  "n_years": 3.1825396825396823,
+  "model_type": "crossmamba"
+}

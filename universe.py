@@ -92,7 +92,7 @@ def load_sector_map(tickers: List[str], cache_dir: str = "data") -> Dict[str, st
         with open(cache_file) as f:
             cached = json.load(f)
         # Return cached if it covers most tickers
-        if len(set(tickers) & set(cached.keys())) > len(tickers) * 0.5:
+        if isinstance(cached, dict) and len(set(tickers) & set(cached.keys())) > len(tickers) * 0.5:
             return cached
 
     # Try Wikipedia first (fast)
@@ -108,6 +108,12 @@ def load_sector_map(tickers: List[str], cache_dir: str = "data") -> Dict[str, st
                 sectors[ticker] = info.get("sector", "Unknown")
             except Exception:
                 sectors[ticker] = "Unknown"
+
+    # If we still have no sectors, generate synthetic mapping
+    if not sectors or len(set(tickers) & set(sectors.keys())) < len(tickers) * 0.3:
+        logger.warning("Network unavailable — generating synthetic sector map")
+        from data_loader import _generate_synthetic_sectors
+        sectors = _generate_synthetic_sectors(tickers)
 
     os.makedirs(cache_dir, exist_ok=True)
     with open(cache_file, "w") as f:

@@ -1,0 +1,14 @@
+{
+  "total_return": 0.2547614223059378,
+  "annual_return": 0.07391359767813732,
+  "annual_volatility": 0.07244358195581303,
+  "sharpe_ratio": 1.0202917288146194,
+  "sortino_ratio": 1.6780999999546173,
+  "max_drawdown": -0.10697901863420567,
+  "calmar_ratio": 0.6909167022900417,
+  "win_rate": 0.529925187032419,
+  "profit_factor": 1.175301451880848,
+  "n_days": 802.0,
+  "n_years": 3.1825396825396823,
+  "model_type": "tst"
+}

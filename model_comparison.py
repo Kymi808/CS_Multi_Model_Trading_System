@@ -59,7 +59,7 @@ def run_single_model_pipeline(
 
     if oos_predictions.empty:
         logger.error(f"[{model_type}] No predictions generated")
-        return pd.DataFrame(), {}, pd.DataFrame()
+        return pd.DataFrame(), {}, pd.DataFrame(), pd.Series(dtype=float)
 
     # Risk model
     risk = FactorRiskModel(cfg.risk)
@@ -141,7 +141,7 @@ def run_single_model_pipeline(
 
     if results_df.empty:
         logger.error(f"[{model_type}] No returns computed")
-        return pd.DataFrame(), {}, metrics_df
+        return pd.DataFrame(), {}, metrics_df, oos_predictions
 
     summary = compute_performance_metrics(results_df["net_return"])
     summary["model_type"] = model_type
@@ -160,7 +160,7 @@ def run_single_model_pipeline(
         model_path = os.path.join(cfg.model_dir, f"latest_{model_type}_model.pkl")
         models[-1].save(model_path)
 
-    return results_df, summary, metrics_df
+    return results_df, summary, metrics_df, oos_predictions
 
 
 def build_ensemble_predictions(
@@ -251,7 +251,7 @@ def run_comparison(
         logger.info(f"# MODEL: {model_type.upper()}")
         logger.info(f"{'#'*60}")
 
-        results_df, summary, metrics_df = run_single_model_pipeline(
+        results_df, summary, metrics_df, oos_preds = run_single_model_pipeline(
             model_type=model_type,
             X=X, y=y, cfg=cfg,
             prices=prices, volumes=volumes,
@@ -262,20 +262,7 @@ def run_comparison(
         all_results[model_type] = results_df
         all_summaries[model_type] = summary
         all_metrics[model_type] = metrics_df
-
-        # Store predictions for ensemble
-        model_cfg_map = {
-            "lightgbm": cfg.model,
-            "tst": cfg.tst,
-            "crossmamba": cfg.crossmamba,
-        }
-        model_cfg = model_cfg_map.get(model_type, cfg.model)
-        _, preds, _ = walk_forward_train(
-            X, y, cfg.model, cfg.features,
-            model_type=model_type,
-            model_cfg=model_cfg,
-        )
-        all_predictions[model_type] = preds
+        all_predictions[model_type] = oos_preds
 
     # Ensemble
     if cfg.comparison.run_ensemble and len(all_predictions) > 1:

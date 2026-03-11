@@ -94,8 +94,8 @@ class TSTConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     batch_size: int = 256
-    epochs: int = 30
-    patience: int = 5
+    epochs: int = 3
+    patience: int = 2
     random_state: int = 42
 
 
@@ -112,8 +112,8 @@ class CrossMambaConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     batch_size: int = 256
-    epochs: int = 30
-    patience: int = 5
+    epochs: int = 3
+    patience: int = 2
     random_state: int = 42
 
 

@@ -148,7 +148,7 @@ class EnsembleRanker:
 def walk_forward_train(
     X: pd.DataFrame, y: pd.Series, cfg: ModelConfig, feature_cfg: FeatureConfig,
     model_type: str = "lightgbm", model_cfg=None,
-) -> Tuple[list, pd.DataFrame]:
+) -> Tuple[list, pd.Series, pd.DataFrame]:
     """
     Walk-forward training with purge/embargo gap.
 
@@ -221,7 +221,30 @@ def walk_forward_train(
         metrics_history.append(metrics)
 
         if len(X_p) > 0:
-            all_preds.append(model.predict(X_p))
+            # For sequence models (TST, CrossMamba), include lookback context
+            # so they can build sequences for the first prediction dates
+            if model_type in ("tst", "crossmamba"):
+                seq_len = getattr(effective_cfg, "sequence_length", 21)
+                if isinstance(X.index, pd.MultiIndex):
+                    # Get dates before pred_dates for context
+                    context_start = max(0, pred_start - seq_len)
+                    context_dates = dates[context_start:pred_end]
+                    X_p_ctx = X.loc[X.index.get_level_values(0).isin(context_dates)]
+                else:
+                    context_start = max(0, pred_start - seq_len)
+                    context_dates = dates[context_start:pred_end]
+                    X_p_ctx = X.loc[context_dates]
+                preds = model.predict(X_p_ctx)
+                # Only keep predictions for actual pred_dates
+                if isinstance(preds.index, pd.MultiIndex):
+                    mask = preds.index.get_level_values(0).isin(pred_dates)
+                    preds = preds[mask]
+                else:
+                    preds = preds[preds.index.isin(pred_dates)]
+                if len(preds) > 0:
+                    all_preds.append(preds)
+            else:
+                all_preds.append(model.predict(X_p))
 
         models.append(model)
 
