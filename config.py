@@ -83,6 +83,53 @@ class ModelConfig:
 
 
 @dataclass
+class TSTConfig:
+    """Time Series Transformer configuration."""
+    d_model: int = 64
+    n_heads: int = 4
+    n_encoder_layers: int = 2
+    d_ff: int = 128
+    dropout: float = 0.2
+    sequence_length: int = 21  # lookback window in days
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    batch_size: int = 256
+    epochs: int = 30
+    patience: int = 5
+    random_state: int = 42
+
+
+@dataclass
+class CrossMambaConfig:
+    """CrossMamba (selective state-space model) configuration."""
+    d_model: int = 64
+    d_state: int = 16
+    d_conv: int = 4
+    expand_factor: int = 2
+    n_layers: int = 2
+    dropout: float = 0.2
+    sequence_length: int = 21
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    batch_size: int = 256
+    epochs: int = 30
+    patience: int = 5
+    random_state: int = 42
+
+
+@dataclass
+class ComparisonConfig:
+    """Configuration for multi-model comparison."""
+    models_to_run: List[str] = field(default_factory=lambda: [
+        "lightgbm", "tst", "crossmamba",
+    ])
+    run_ensemble: bool = True
+    ensemble_weights: Dict[str, float] = field(default_factory=lambda: {
+        "lightgbm": 0.34, "tst": 0.33, "crossmamba": 0.33,
+    })
+
+
+@dataclass
 class RiskConfig:
     sector_neutral: bool = True
     max_sector_net_pct: float = 0.03
@@ -131,6 +178,9 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    tst: TSTConfig = field(default_factory=TSTConfig)
+    crossmamba: CrossMambaConfig = field(default_factory=CrossMambaConfig)
+    comparison: ComparisonConfig = field(default_factory=ComparisonConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)

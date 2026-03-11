@@ -1,11 +1,12 @@
 """
-LightGBM ensemble ranker with walk-forward validation.
+Alpha model ensemble rankers with walk-forward validation.
 
-Key upgrades from v1:
-- Ensemble of N models with different seeds (reduces variance)
-- Tighter regularization (financial data is noisy)
-- Feature importance tracking and pruning
-- Information Coefficient (IC) monitoring
+Supports three architectures:
+- LightGBM (gradient boosting) — default, fast, interpretable
+- TST (Time Series Transformer) — attention-based sequence model
+- CrossMamba (selective state-space) — linear-time sequence model
+
+All share the same interface: train(), predict(), save(), load()
 """
 import lightgbm as lgb
 import numpy as np
@@ -13,10 +14,24 @@ import pandas as pd
 import logging
 import os
 import pickle
-from typing import Dict, List, Tuple, Optional
-from config import ModelConfig, FeatureConfig
+from typing import Dict, List, Tuple, Optional, Union
+from config import ModelConfig, FeatureConfig, TSTConfig, CrossMambaConfig
 
 logger = logging.getLogger(__name__)
+
+
+def create_model(model_type: str, cfg) -> "Union[EnsembleRanker, object]":
+    """Factory function to create a model by name."""
+    if model_type == "lightgbm":
+        return EnsembleRanker(cfg)
+    elif model_type == "tst":
+        from models.tst_model import TSTRanker
+        return TSTRanker(cfg)
+    elif model_type == "crossmamba":
+        from models.crossmamba_model import CrossMambaRanker
+        return CrossMambaRanker(cfg)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
 
 
 class EnsembleRanker:
@@ -132,8 +147,15 @@ class EnsembleRanker:
 
 def walk_forward_train(
     X: pd.DataFrame, y: pd.Series, cfg: ModelConfig, feature_cfg: FeatureConfig,
-) -> Tuple[List[EnsembleRanker], pd.DataFrame]:
-    """Walk-forward training with purge/embargo gap."""
+    model_type: str = "lightgbm", model_cfg=None,
+) -> Tuple[list, pd.DataFrame]:
+    """
+    Walk-forward training with purge/embargo gap.
+
+    Args:
+        model_type: "lightgbm", "tst", or "crossmamba"
+        model_cfg: Config object for the chosen model type (uses cfg for lightgbm)
+    """
     if isinstance(X.index, pd.MultiIndex):
         dates = sorted(X.index.get_level_values(0).unique())
     else:
@@ -143,6 +165,9 @@ def walk_forward_train(
     retrain_every = cfg.retrain_every_days
     purge = cfg.purge_gap_days
     embargo = cfg.embargo_days
+
+    # Use the appropriate config for non-LightGBM models
+    effective_cfg = model_cfg if model_cfg is not None else cfg
 
     models = []
     all_preds = []
@@ -181,12 +206,12 @@ def walk_forward_train(
 
         window_num = len(models) + 1
         logger.info(
-            f"Window {window_num}: "
+            f"[{model_type.upper()}] Window {window_num}: "
             f"Train {train_dates[0].date()}→{train_dates[-1].date()} ({len(X_tr)}), "
             f"Predict {pred_dates[0].date()}→{pred_dates[-1].date()}"
         )
 
-        model = EnsembleRanker(cfg)
+        model = create_model(model_type, effective_cfg)
         metrics = model.train(
             X_tr, y_tr,
             X_v if len(X_v) > 0 else None,
@@ -203,13 +228,12 @@ def walk_forward_train(
     predictions = pd.concat(all_preds) if all_preds else pd.Series(dtype=float)
     metrics_df = pd.DataFrame(metrics_history)
 
-    logger.info(f"Walk-forward: {len(models)} windows, {len(predictions)} predictions")
+    logger.info(f"[{model_type.upper()}] Walk-forward: {len(models)} windows, {len(predictions)} predictions")
     if "val_rank_ic" in metrics_df.columns:
         avg_ic = metrics_df["val_rank_ic"].mean()
         std_ic = metrics_df["val_rank_ic"].std()
-        logger.info(f"Avg Rank IC: {avg_ic:.4f} ± {std_ic:.4f}")
-        # IC Information Ratio
+        logger.info(f"[{model_type.upper()}] Avg Rank IC: {avg_ic:.4f} ± {std_ic:.4f}")
         ir = avg_ic / (std_ic + 1e-8)
-        logger.info(f"IC Information Ratio: {ir:.2f}")
+        logger.info(f"[{model_type.upper()}] IC Information Ratio: {ir:.2f}")
 
-    return models, predictions
+    return models, predictions, metrics_df

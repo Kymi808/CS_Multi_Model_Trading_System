@@ -1,19 +1,35 @@
-# Cross-Sectional Ranking System (v4)
+# Cross-Sectional Ranking System (v5 — Multi-Model)
 
-A quantitative long/short equity system that ranks S&P 500 stocks using machine learning and trades via Alpaca.
+A quantitative long/short equity system that ranks ~100 S&P 500 stocks using three competing alpha model architectures, then passes all predictions through the same risk, transaction cost, and portfolio construction pipeline to answer: **does the choice of alpha model architecture meaningfully impact portfolio-level performance?**
+
+## Alpha Models
+
+| Model | Architecture | Complexity | Key Property |
+|-------|-------------|-----------|--------------|
+| **LightGBM** | Gradient boosting ensemble | O(n log n) | Handles tabular data natively, fast to train |
+| **TST** | Time Series Transformer | O(n²) | Multi-head attention captures cross-time dependencies |
+| **CrossMamba** | Selective State-Space Model | O(n) | Linear-time selective scan, long-range memory |
+
+All three operate on **identical features** to isolate the effect of architecture from all other system components.
 
 ## How It Works
 
-The system predicts which stocks will outperform or underperform over the next 10 trading days using a LightGBM ensemble trained on 50 stability-selected features. It goes long the top-ranked stocks and shorts the bottom-ranked, with a structural long bias to capture market returns.
+The system predicts which stocks will outperform or underperform over the next 10 trading days. It goes long the top-ranked stocks and shorts the bottom-ranked, with a structural long bias to capture market returns.
 
-**Core pipeline:**
-1. Fetch prices, fundamentals, sentiment, and cross-asset data for 102 S&P 500 stocks
-2. Engineer 186 features (momentum, volatility, value, quality, earnings, cross-asset)
-3. Select 50 features with stable predictive power across multiple time periods
-4. Train an ensemble of 3 LightGBM models via walk-forward validation
-5. Rank all stocks, go long the top 14 and short the bottom 7
-6. Apply risk management: factor neutralization, vol targeting, drawdown control, regime overlay
-7. Execute via Alpaca (paper or live)
+**Core pipeline (5-component architecture):**
+1. **Data**: Fetch prices, fundamentals, sentiment, and cross-asset data for ~100 S&P 500 stocks
+2. **Features**: Engineer 186 features (momentum, volatility, value, quality, earnings, cross-asset)
+3. **Feature Selection**: Select 50 features with stable predictive power across multiple time periods
+4. **Alpha Model**: Train via walk-forward validation — LightGBM, TST, CrossMamba, or all three
+5. **Risk Model**: Barra-style factor neutralization, vol targeting, drawdown control, regime overlay
+6. **Transaction Cost Model**: Penalize turnover (commission + slippage + spread)
+7. **Portfolio Construction**: Risk-parity weighting with position and turnover constraints
+8. **Execution**: Execute via Alpaca (paper or live)
+
+**Research questions:**
+- Do TST and CrossMamba achieve higher Information Coefficients than LightGBM under identical walk-forward validation?
+- Does any improvement in statistical accuracy survive the full pipeline? After risk model adjustment and transaction costs, which architecture produces the highest Sharpe ratio, lowest max drawdown, and greatest alpha vs S&P 500?
+- Can an ensemble combining predictions from all three architectures outperform any single model?
 
 ## Backtest Results
 
@@ -50,38 +66,42 @@ export ALPACA_API_SECRET="your_secret"
 
 ## Usage
 
-### 1. Train the Model (run once)
+### 1. Compare All Alpha Models (primary use case)
+
+```bash
+python main.py compare
+```
+
+Runs LightGBM, TST, and CrossMamba through the same pipeline, plus a weighted ensemble. Outputs a comparison table of all metrics (Sharpe, Sortino, max drawdown, IC, alpha vs SPY, etc.) and saves comparison plots.
+
+```bash
+# Compare specific models only
+python main.py compare --models lightgbm,tst
+
+# Compare without ensemble
+python main.py compare --no-ensemble
+
+# Long-biased mode
+python main.py compare --long-biased --n-long 14 --n-short 7
+```
+
+### 2. Train Single Model (LightGBM backtest)
 
 ```bash
 python main.py backtest --long-biased --n-long 14 --n-short 7 --optimize
 ```
 
-This runs the full pipeline: data fetch → feature engineering → feature selection → Optuna hyperparameter optimization → walk-forward training → backtest simulation. Takes ~5 minutes. Saves the trained model to `models/latest_model.pkl` and Optuna params to `results/optuna_best_params.json`.
+This runs the full pipeline with LightGBM only. Saves the trained model to `models/latest_model.pkl`.
 
-**Don't run `--optimize` again** unless you want to retrain — it overwrites your saved model.
-
-### 2. View Today's Signals
+### 3. View Today's Signals
 
 ```bash
 python main.py signal --long-biased --n-long 14 --n-short 7
 ```
 
-Shows current portfolio recommendations without trading. Useful for reviewing before executing.
-
-### 3. Paper Trade
+### 4. Paper Trade
 
 ```bash
-python main.py trade --long-biased --n-long 14 --n-short 7
-```
-
-Generates signals and executes via Alpaca paper trading. Shows the full trade plan and asks for confirmation before executing. Run during market hours (9:30 AM – 4:00 PM ET).
-
-### 4. Rebalance
-
-Run the trade command **once per week** (e.g., every Monday morning). The system compares your current Alpaca positions to the new target portfolio and only trades the difference. Clear the data cache first to fetch fresh data:
-
-```bash
-rm -rf data/
 python main.py trade --long-biased --n-long 14 --n-short 7
 ```
 
@@ -91,7 +111,7 @@ python main.py trade --long-biased --n-long 14 --n-short 7
 python main.py trade --long-biased --n-long 14 --n-short 7 --live
 ```
 
-Requires typing `CONFIRM` before executing. Paper trade for at least 2–3 months first.
+Requires typing `CONFIRM` before executing.
 
 ## Configuration Options
 
@@ -121,21 +141,25 @@ python main.py backtest --optimize
 ## Architecture
 
 ```
-main.py                 CLI entry point, argument parsing
-├── backtest.py         Walk-forward backtest engine
-├── signal_generator.py Signal generation for live trading (same pipeline as backtest)
-├── config.py           All configuration parameters
-├── universe.py         S&P 500 universe construction
-├── data_loader.py      Price, fundamental, cross-asset data fetching (yfinance)
-├── features.py         Price/volume feature engineering (100 features)
+main.py                      CLI entry point (backtest, compare, signal, trade)
+├── backtest.py              Walk-forward backtest engine (single model)
+├── model_comparison.py      Multi-model comparison framework
+├── signal_generator.py      Signal generation for live trading
+├── config.py                All configuration (ModelConfig, TSTConfig, CrossMambaConfig, etc.)
+├── universe.py              S&P 500 universe construction
+├── data_loader.py           Price, fundamental, cross-asset data fetching (yfinance)
+├── features.py              Price/volume feature engineering (100 features)
 ├── fundamental_features.py  Earnings, value, quality signals (40 features)
 ├── cross_asset_features.py  Rates, VIX, sector ETF signals (36 features)
 ├── sentiment_features.py    News sentiment via yfinance (10 features)
-├── model.py            LightGBM ensemble + walk-forward training
-├── optuna_tuner.py     Hyperparameter optimization
-├── portfolio.py        Portfolio construction (risk parity, turnover control)
-├── risk_model.py       Barra-style factor risk model + regime overlay
-└── execution.py        Alpaca order execution
+├── model.py                 Model factory + walk-forward training (all architectures)
+├── models/
+│   ├── tst_model.py         Time Series Transformer implementation
+│   └── crossmamba_model.py  CrossMamba (selective state-space) implementation
+├── optuna_tuner.py          Hyperparameter optimization (LightGBM)
+├── portfolio.py             Portfolio construction (risk parity, turnover control)
+├── risk_model.py            Barra-style factor risk model + regime overlay
+└── execution.py             Alpaca order execution
 ```
 
 ### Pipeline Consistency
@@ -208,9 +232,16 @@ The strategy captures ~70% of market upside with ~60% of market downside. It won
 
 | File | Description |
 |------|-------------|
-| `models/latest_model.pkl` | Trained ensemble model |
+| `models/latest_model.pkl` | Trained LightGBM model |
+| `models/latest_tst_model.pkl` | Trained TST model |
+| `models/latest_crossmamba_model.pkl` | Trained CrossMamba model |
+| `results/model_comparison.json` | Metrics comparison table (all models) |
+| `results/model_comparison.png` | Comparison visualization (cumulative returns, drawdown, Sharpe, bar chart) |
+| `results/comparison_table.csv` | Comparison table as CSV |
+| `results/returns_*.csv` | Per-model daily returns |
+| `results/summary_*.json` | Per-model summary metrics |
+| `results/backtest_performance_*.png` | Per-model equity curve plots |
 | `results/optuna_best_params.json` | Optimized hyperparameters |
-| `results/backtest_performance.png` | Equity curve plot |
 | `results/latest_signals.csv` | Most recent signal output |
 | `results/trades_*.json` | Trade execution logs |
 | `data/` | Cached price/fundamental data (clear before rebalancing) |

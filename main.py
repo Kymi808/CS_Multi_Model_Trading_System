@@ -2,12 +2,15 @@
 """
 Quant-Grade Cross-Sectional Equity Ranking System
 ===================================================
+Multi-Model Alpha Comparison: LightGBM vs TST vs CrossMamba
 
 Usage:
-    python main.py backtest                # Market-neutral 10L/10S
+    python main.py backtest                # LightGBM backtest (original)
     python main.py backtest --long-biased  # Bull-market mode 15L/5S
     python main.py backtest --optimize     # With Optuna HP tuning
-    python main.py backtest --long-only    # Long-only version
+    python main.py compare                 # Compare ALL 3 models + ensemble
+    python main.py compare --models lightgbm,tst  # Compare specific models
+    python main.py compare --no-ensemble   # Skip ensemble
     python main.py signal                  # Today's signal
     python main.py trade                   # Paper trade via Alpaca
     python main.py trade --live            # LIVE (careful!)
@@ -33,20 +36,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def cmd_backtest(args):
-    from config import Config
-    from backtest import run_backtest
-
-    cfg = Config()
-    if args.universe:
+def _apply_portfolio_args(cfg, args):
+    """Apply common portfolio CLI args to config."""
+    if hasattr(args, 'universe') and args.universe:
         cfg.data.universe_source = args.universe
-    if args.horizon:
+    if hasattr(args, 'horizon') and args.horizon:
         cfg.features.primary_target_horizon = args.horizon
-    if args.long_only:
+    if hasattr(args, 'long_only') and args.long_only:
         cfg.portfolio.long_short = False
         cfg.portfolio.max_positions_long = 20
         cfg.portfolio.max_positions_short = 0
-    if args.long_biased:
+    if hasattr(args, 'long_biased') and args.long_biased:
         cfg.portfolio.max_positions_long = 15
         cfg.portfolio.max_positions_short = 5
         cfg.portfolio.max_gross_leverage = 1.6
@@ -55,13 +55,20 @@ def cmd_backtest(args):
         cfg.risk.max_sector_net_pct = 0.10
         cfg.risk.target_annual_vol = 0.15
         cfg.risk.max_drawdown_threshold = -0.12
-    # Custom L/S counts (overrides defaults or --long-biased)
-    if args.n_long is not None:
+    if hasattr(args, 'n_long') and args.n_long is not None:
         cfg.portfolio.max_positions_long = args.n_long
-    if args.n_short is not None:
+    if hasattr(args, 'n_short') and args.n_short is not None:
         cfg.portfolio.max_positions_short = args.n_short
+    return cfg
+
+
+def cmd_backtest(args):
+    from config import Config
+    from backtest import run_backtest
+
+    cfg = Config()
+    cfg = _apply_portfolio_args(cfg, args)
     if args.no_fundamentals:
-        # Skip fundamentals for faster iteration
         pass  # Handled in backtest.py
 
     logger.info("Starting quant-grade backtest...")
@@ -74,6 +81,128 @@ def cmd_backtest(args):
             logger.warning(f"Plotting failed: {e}")
 
     return results, summary
+
+
+def cmd_compare(args):
+    """Run all three alpha models + ensemble through the same pipeline and compare."""
+    from config import Config
+    from data_loader import (
+        fetch_price_data, fetch_cross_asset_data,
+        fetch_fundamental_data, fetch_earnings_dates,
+    )
+    from universe import get_universe, filter_universe_by_liquidity, load_sector_map
+    from fundamental_features import build_fundamental_features
+    from cross_asset_features import build_cross_asset_features
+    from sentiment_features import fetch_news_sentiment, build_sentiment_features
+    from features import build_all_features, panel_to_ml_format
+    from backtest import select_features_by_ic
+    from model_comparison import (
+        run_comparison, print_comparison, save_comparison,
+        generate_comparison_plots,
+    )
+
+    cfg = Config()
+    cfg = _apply_portfolio_args(cfg, args)
+
+    # Select which models to run
+    if args.models:
+        cfg.comparison.models_to_run = [m.strip() for m in args.models.split(",")]
+    if args.no_ensemble:
+        cfg.comparison.run_ensemble = False
+
+    logger.info("Starting multi-model comparison...")
+    logger.info(f"Models: {cfg.comparison.models_to_run}")
+
+    for d in [cfg.data_dir, cfg.model_dir, cfg.results_dir]:
+        os.makedirs(d, exist_ok=True)
+
+    # ============================================================
+    # DATA PIPELINE (shared across all models — identical features)
+    # ============================================================
+    logger.info("=" * 60)
+    logger.info("STEP 1-7: Shared data pipeline (identical for all models)")
+    logger.info("=" * 60)
+
+    # 1. Universe & prices
+    tickers = get_universe(cfg.data)
+    prices, volumes = fetch_price_data(tickers, cfg.data, cache_dir=cfg.data_dir)
+    tickers = filter_universe_by_liquidity(tickers, cfg.data, prices, volumes)
+    prices = prices[[t for t in tickers if t in prices.columns]]
+    volumes = volumes[[t for t in tickers if t in volumes.columns]]
+    tickers = list(prices.columns)
+    logger.info(f"Universe: {len(tickers)} tickers, {len(prices)} days")
+
+    # 2. Sectors
+    sector_map = load_sector_map(tickers, cache_dir=cfg.data_dir)
+
+    # 3. Fundamentals
+    fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
+    earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
+    fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
+
+    # 4. Sentiment
+    sentiment_data = fetch_news_sentiment(tickers, cache_dir=cfg.data_dir)
+    sent_feats = build_sentiment_features(sentiment_data, prices)
+
+    # 5. Cross-asset
+    all_ca = cfg.data.cross_asset_tickers + cfg.data.sector_etfs
+    ca_prices = fetch_cross_asset_data(
+        all_ca, prices.index[0].strftime("%Y-%m-%d"),
+        prices.index[-1].strftime("%Y-%m-%d"), cache_dir=cfg.data_dir,
+    )
+    ca_only = ca_prices[[c for c in cfg.data.cross_asset_tickers if c in ca_prices.columns]] if not ca_prices.empty else pd.DataFrame()
+    sect_etf = ca_prices[[c for c in cfg.data.sector_etfs if c in ca_prices.columns]] if not ca_prices.empty else pd.DataFrame()
+    ca_feats = build_cross_asset_features(ca_only, prices, sect_etf, sector_map, cfg.features.cross_asset_windows)
+
+    # 6. Feature engineering
+    features, targets = build_all_features(
+        prices, volumes, cfg.features,
+        fundamental_feats=fund_feats,
+        cross_asset_feats={**sent_feats, **ca_feats},
+    )
+    h = cfg.features.primary_target_horizon
+    target_key = f"fwd_rank_{h}d"
+    target = targets.get(target_key, targets.get(f"fwd_ret_{h}d"))
+    X, y = panel_to_ml_format(features, target)
+
+    # 7. Feature selection
+    selected_features = select_features_by_ic(X, y, max_features=50)
+    X = X[selected_features]
+
+    # ============================================================
+    # RUN ALL MODELS
+    # ============================================================
+    all_results, all_summaries, comparison = run_comparison(
+        cfg=cfg, X=X, y=y,
+        prices=prices, volumes=volumes,
+        fundamentals=fundamentals,
+        sector_map=sector_map,
+        selected_features=selected_features,
+    )
+
+    # ============================================================
+    # OUTPUT RESULTS
+    # ============================================================
+    print_comparison(comparison, all_summaries)
+
+    # Save everything
+    save_comparison(comparison, all_summaries, all_results, cfg.results_dir)
+
+    # Generate comparison plots
+    try:
+        generate_comparison_plots(all_results, comparison, cfg.results_dir)
+    except Exception as e:
+        logger.warning(f"Comparison plotting failed: {e}")
+
+    # Also generate individual plots for each model
+    for name, results in all_results.items():
+        if not results.empty and name in all_summaries:
+            try:
+                generate_plots_named(results, all_summaries[name], name, cfg.results_dir)
+            except Exception as e:
+                logger.warning(f"Plot for {name} failed: {e}")
+
+    return all_results, all_summaries, comparison
 
 
 def cmd_signal(args):
@@ -225,6 +354,10 @@ def cmd_trade(args):
 
 
 def generate_plots(results: "pd.DataFrame", summary: dict):
+    generate_plots_named(results, summary, "strategy", "results")
+
+
+def generate_plots_named(results: "pd.DataFrame", summary: dict, name: str, results_dir: str):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -234,6 +367,8 @@ def generate_plots(results: "pd.DataFrame", summary: dict):
 
     fig, axes = plt.subplots(5, 1, figsize=(14, 20), dpi=100)
 
+    title_prefix = name.upper()
+
     # 1. Cumulative returns
     cum = (1 + results["net_return"]).cumprod()
     cum_gross = (1 + results["gross_return"]).cumprod()
@@ -242,7 +377,7 @@ def generate_plots(results: "pd.DataFrame", summary: dict):
     axes[0].axhline(1, color="gray", ls="--", alpha=0.5)
     axes[0].set_ylabel("Cumulative Return")
     axes[0].set_title(
-        f"Quant-Grade Strategy | Sharpe: {summary.get('sharpe_ratio',0):.2f} | "
+        f"{title_prefix} | Sharpe: {summary.get('sharpe_ratio',0):.2f} | "
         f"Ann: {summary.get('annual_return',0):.1%} | MaxDD: {summary.get('max_drawdown',0):.1%}"
     )
     axes[0].legend()
@@ -252,7 +387,7 @@ def generate_plots(results: "pd.DataFrame", summary: dict):
     dd = cum / cum.cummax() - 1
     axes[1].fill_between(dd.index, dd, 0, color="red", alpha=0.3)
     axes[1].set_ylabel("Drawdown")
-    axes[1].set_title("Drawdown")
+    axes[1].set_title(f"{title_prefix} — Drawdown")
     axes[1].grid(True, alpha=0.3)
 
     # 3. Rolling Sharpe
@@ -262,21 +397,21 @@ def generate_plots(results: "pd.DataFrame", summary: dict):
     axes[2].axhline(1, color="green", ls="--", alpha=0.3)
     axes[2].axhline(-1, color="red", ls="--", alpha=0.3)
     axes[2].set_ylabel("Rolling Sharpe (63d)")
-    axes[2].set_title("Rolling Sharpe Ratio")
+    axes[2].set_title(f"{title_prefix} — Rolling Sharpe Ratio")
     axes[2].grid(True, alpha=0.3)
 
     # 4. Net exposure
     axes[3].plot(results.index, results["net_exposure"], "purple", lw=1)
     axes[3].axhline(0, color="gray", ls="--", alpha=0.5)
     axes[3].set_ylabel("Net Exposure")
-    axes[3].set_title(f"Net Exposure (avg: {results['net_exposure'].mean():.2%})")
+    axes[3].set_title(f"{title_prefix} — Net Exposure (avg: {results['net_exposure'].mean():.2%})")
     axes[3].grid(True, alpha=0.3)
 
     # 5. Turnover
     axes[4].bar(results.index, results["turnover"], color="orange", alpha=0.5, width=1)
     axes[4].axhline(results["turnover"].mean(), color="orange", ls="--", alpha=0.7)
     axes[4].set_ylabel("Daily Turnover")
-    axes[4].set_title(f"Turnover (avg: {results['turnover'].mean():.1%})")
+    axes[4].set_title(f"{title_prefix} — Turnover (avg: {results['turnover'].mean():.1%})")
     axes[4].grid(True, alpha=0.3)
 
     for ax in axes:
@@ -284,17 +419,22 @@ def generate_plots(results: "pd.DataFrame", summary: dict):
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
 
     plt.tight_layout()
-    path = "results/backtest_performance.png"
+    path = os.path.join(results_dir, f"backtest_performance_{name}.png")
     plt.savefig(path, bbox_inches="tight")
     logger.info(f"Plot saved: {path}")
     plt.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Quant-Grade Equity Ranking System")
+    parser = argparse.ArgumentParser(
+        description="Quant-Grade Cross-Sectional Equity Ranking System\n"
+                    "with Multi-Model Comparison (LightGBM / TST / CrossMamba)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command")
 
-    bt = sub.add_parser("backtest")
+    # --- backtest (original LightGBM-only) ---
+    bt = sub.add_parser("backtest", help="Run backtest with LightGBM (original)")
     bt.add_argument("--universe", choices=["sp500", "nasdaq100", "custom"])
     bt.add_argument("--horizon", type=int)
     bt.add_argument("--long-only", action="store_true")
@@ -304,12 +444,26 @@ def main():
     bt.add_argument("--no-fundamentals", action="store_true")
     bt.add_argument("--optimize", action="store_true", help="Run Optuna hyperparameter optimization")
 
-    sig = sub.add_parser("signal")
+    # --- compare (multi-model) ---
+    cmp = sub.add_parser("compare", help="Compare all alpha models (LightGBM, TST, CrossMamba, Ensemble)")
+    cmp.add_argument("--models", type=str, default=None,
+                     help="Comma-separated model list (default: lightgbm,tst,crossmamba)")
+    cmp.add_argument("--no-ensemble", action="store_true", help="Skip ensemble combination")
+    cmp.add_argument("--universe", choices=["sp500", "nasdaq100", "custom"])
+    cmp.add_argument("--horizon", type=int)
+    cmp.add_argument("--long-only", action="store_true")
+    cmp.add_argument("--long-biased", action="store_true")
+    cmp.add_argument("--n-long", type=int)
+    cmp.add_argument("--n-short", type=int)
+
+    # --- signal ---
+    sig = sub.add_parser("signal", help="Generate today's trading signals")
     sig.add_argument("--long-biased", action="store_true")
     sig.add_argument("--n-long", type=int)
     sig.add_argument("--n-short", type=int)
 
-    trade = sub.add_parser("trade")
+    # --- trade ---
+    trade = sub.add_parser("trade", help="Execute trades via Alpaca")
     trade.add_argument("--live", action="store_true")
     trade.add_argument("--long-biased", action="store_true")
     trade.add_argument("--n-long", type=int)
@@ -319,13 +473,18 @@ def main():
 
     if args.command == "backtest":
         cmd_backtest(args)
+    elif args.command == "compare":
+        cmd_compare(args)
     elif args.command == "signal":
         cmd_signal(args)
     elif args.command == "trade":
         cmd_trade(args)
     else:
         parser.print_help()
-        print("\nQuick start: python main.py backtest")
+        print("\nQuick start:")
+        print("  python main.py backtest              # LightGBM backtest")
+        print("  python main.py compare               # Compare all 3 models + ensemble")
+        print("  python main.py compare --models lightgbm,tst  # Compare specific models")
 
 
 if __name__ == "__main__":

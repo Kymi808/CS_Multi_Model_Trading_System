@@ -24,7 +24,7 @@ from fundamental_features import build_fundamental_features
 from cross_asset_features import build_cross_asset_features
 from sentiment_features import fetch_news_sentiment, build_sentiment_features
 from features import build_all_features, panel_to_ml_format
-from model import EnsembleRanker, walk_forward_train
+from model import EnsembleRanker, walk_forward_train, create_model
 from risk_model import FactorRiskModel
 from portfolio import (
     PortfolioConstructor, compute_portfolio_returns, compute_performance_metrics,
@@ -263,7 +263,7 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
     # 9. TRAIN MODELS
     # ==================================================================
     _log_step(9, "Walk-forward training (ensemble)")
-    models, oos_predictions = walk_forward_train(X, y, cfg.model, cfg.features)
+    models, oos_predictions, _metrics_df = walk_forward_train(X, y, cfg.model, cfg.features)
 
     if oos_predictions.empty:
         logger.error("No predictions generated")
