@@ -27,8 +27,30 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("retrain")
 
+
+def _fix_for_pickle(data: dict) -> dict:
+    """
+    Fix StringDtype indexes before pickling.
+    GitHub Actions uses newer pandas that creates StringDtype indexes.
+    Older pandas on Mac can't unpickle these. Convert to plain object dtype.
+    """
+    import pandas as pd
+    if "feature_importance" in data and isinstance(data["feature_importance"], pd.Series):
+        fi = data["feature_importance"]
+        data["feature_importance"] = pd.Series(
+            fi.values,
+            index=pd.Index([str(x) for x in fi.index]),
+            name=fi.name,
+        )
+    if "feature_names" in data:
+        data["feature_names"] = [str(f) for f in data["feature_names"]]
+    return data
+
 # Path to OpenClaw (for Alpaca data adapter)
-OPENCLAW_PATH = os.path.join(os.path.dirname(__file__), "..", "VSNX", "openclaw-fintech")
+OPENCLAW_PATH = os.environ.get(
+    "OPENCLAW_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "VSNX", "openclaw-fintech"),
+)
 
 
 def _patch_for_alpaca():
@@ -64,7 +86,48 @@ def _patch_for_alpaca():
         data_loader.fetch_cross_asset_data = alpaca_cross_asset
         sentiment_features.fetch_news_sentiment = alpaca_sentiment
 
-        logger.info("Data fetchers patched to use Alpaca (professional data)")
+        # Also enhance sentiment with LLM analysis when Anthropic key available
+        try:
+            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if anthropic_key and not anthropic_key.startswith("sk-ant-xxx"):
+                from skills.news.llm_sentiment import (
+                    analyze_articles_batch, compute_llm_sentiment_features,
+                )
+                _base_sentiment = sentiment_features.fetch_news_sentiment
+
+                def _enhanced_sentiment(tickers, max_per_ticker=10, cache_dir="data"):
+                    base = _base_sentiment(tickers, max_per_ticker, cache_dir)
+                    try:
+                        import asyncio
+                        from skills.market_data import get_data_provider
+
+                        async def _llm():
+                            provider = get_data_provider()
+                            articles = await provider.get_news(symbols=tickers[:30], limit=30)
+                            dicts = [{"headline": a.headline, "summary": a.summary,
+                                      "symbols": a.symbols, "source": a.source,
+                                      "created_at": a.created_at.isoformat()} for a in articles]
+                            return await analyze_articles_batch(dicts)
+
+                        analyses = asyncio.run(_llm())
+                        if analyses:
+                            for t in tickers:
+                                feats = compute_llm_sentiment_features(analyses, t)
+                                if t in base:
+                                    base[t].update(feats)
+                                else:
+                                    base[t] = feats
+                            logger.info(f"LLM sentiment added for {len(tickers)} tickers")
+                    except Exception as e:
+                        logger.debug(f"LLM sentiment skipped: {e}")
+                    return base
+
+                sentiment_features.fetch_news_sentiment = _enhanced_sentiment
+                logger.info("Sentiment enhanced with LLM (Claude Haiku)")
+        except Exception:
+            pass
+
+        logger.info("Data fetchers patched to use Alpaca + LLM sentiment")
     except Exception as e:
         logger.warning(f"Could not patch for Alpaca: {e} — falling back to yfinance/cache")
 
@@ -191,15 +254,15 @@ def retrain(models_to_train: list[str] = None):
             model = EnsembleRanker(cfg.model)
             metrics = model.train(X_train, y_train, X_val, y_val, sample_weight=sample_weight)
 
-            # Save
+            # Save (fix StringDtype for cross-pandas compatibility)
             save_path = f"models/latest_lightgbm_model.pkl"
             with open(save_path, "wb") as f:
-                pickle.dump({
+                pickle.dump(_fix_for_pickle({
                     "models": model.models,
                     "feature_names": model.feature_names,
                     "feature_importance": model.feature_importance,
                     "config": cfg.model,
-                }, f)
+                }), f)
 
         elif model_name in ("crossmamba", "tst"):
             model_cfg = cfg.crossmamba if model_name == "crossmamba" else cfg.tst
@@ -237,17 +300,17 @@ def retrain(models_to_train: list[str] = None):
                     ic = np.corrcoef(val_pred.loc[common], y_val.loc[common])[0, 1]
                     logger.info(f"  Validation IC: {ic:.4f}")
 
-            # Save
+            # Save (fix StringDtype for cross-pandas compatibility)
             save_path = f"models/latest_{model_name}_model.pkl"
             with open(save_path, "wb") as f:
-                pickle.dump({
+                pickle.dump(_fix_for_pickle({
                     "models": model.models if hasattr(model, "models") else [],
                     "feature_names": model.feature_names,
                     "feature_importance": model.feature_importance if hasattr(model, "feature_importance") else pd.Series(dtype=float),
                     "config": model_cfg,
                     "model_states": [m.state_dict() for m in model.models] if hasattr(model, "models") and model.models and hasattr(model.models[0], "state_dict") else [],
                     "n_features": len(model.feature_names),
-                }, f)
+                }), f)
 
         model_elapsed = time.time() - model_start
         logger.info(f"  {model_name} trained in {model_elapsed:.1f}s")
