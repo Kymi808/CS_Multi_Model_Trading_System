@@ -1,0 +1,82 @@
+name: Retrain Models
+
+# Runs every 14 days (matches 10-day prediction horizon)
+# Also can be triggered manually from GitHub Actions tab
+on:
+  schedule:
+    - cron: '0 6 1,15 * *'  # 6 AM UTC on 1st and 15th of each month
+  workflow_dispatch:  # manual trigger button in GitHub UI
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Checkout OpenClaw (for Alpaca data adapter)
+        uses: actions/checkout@v4
+        with:
+          repository: Kymi808/openclaw-fintech
+          path: ../VSNX/openclaw-fintech
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # works without OpenClaw, just uses yfinance
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Install OpenClaw deps for Alpaca adapter
+          pip install httpx nest_asyncio python-dotenv || true
+
+      - name: Clear stale cache data
+        run: |
+          # Remove old cached data so fresh Alpaca data is fetched
+          rm -f data/prices_*.csv data/volumes_*.csv
+          rm -f data/cross_asset.csv data/sentiment.json
+
+      - name: Retrain CrossMamba + LightGBM
+        run: |
+          python retrain.py --models crossmamba,lightgbm
+        env:
+          # Yahoo Finance doesn't need keys
+          # Alpaca keys for universe fetching (optional)
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+
+      - name: Verify models load
+        run: |
+          python -c "
+          import pickle
+          for name in ['latest_crossmamba_model', 'latest_lightgbm_model']:
+              path = f'models/{name}.pkl'
+              try:
+                  data = pickle.load(open(path, 'rb'))
+                  n_feat = len(data.get('feature_names', []))
+                  print(f'{name}: OK ({n_feat} features)')
+              except Exception as e:
+                  print(f'{name}: FAILED - {e}')
+                  exit(1)
+          "
+
+      - name: Commit and push retrained models
+        run: |
+          git config user.name "Kymi808"
+          git config user.email "zeng.kyle13@gmail.com"
+          git add models/latest_crossmamba_model.pkl models/latest_lightgbm_model.pkl
+          # Only commit if models actually changed
+          if git diff --cached --quiet; then
+            echo "No model changes to commit"
+          else
+            git commit -m "Automated retrain: CrossMamba + LightGBM ($(date +%Y-%m-%d))"
+            git push
+          fi

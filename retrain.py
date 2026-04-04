@@ -27,6 +27,47 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("retrain")
 
+# Path to OpenClaw (for Alpaca data adapter)
+OPENCLAW_PATH = os.path.join(os.path.dirname(__file__), "..", "VSNX", "openclaw-fintech")
+
+
+def _patch_for_alpaca():
+    """
+    Replace yfinance data fetchers with Alpaca adapter if available.
+    This ensures retraining uses professional data, not yfinance scraping.
+    """
+    alpaca_key = os.environ.get("ALPACA_API_KEY", "")
+    if not alpaca_key or alpaca_key in ("", "xxxxx"):
+        logger.info("Alpaca not configured — using yfinance/cache for data")
+        return
+
+    # Add OpenClaw to path for the adapter
+    if os.path.exists(OPENCLAW_PATH):
+        import sys
+        if OPENCLAW_PATH not in sys.path:
+            sys.path.insert(0, OPENCLAW_PATH)
+    else:
+        logger.info(f"OpenClaw not found at {OPENCLAW_PATH} — using yfinance/cache")
+        return
+
+    try:
+        from skills.market_data.adapter import (
+            fetch_price_data as alpaca_prices,
+            fetch_cross_asset_data as alpaca_cross_asset,
+            fetch_news_sentiment as alpaca_sentiment,
+        )
+
+        import data_loader
+        import sentiment_features
+
+        data_loader.fetch_price_data = alpaca_prices
+        data_loader.fetch_cross_asset_data = alpaca_cross_asset
+        sentiment_features.fetch_news_sentiment = alpaca_sentiment
+
+        logger.info("Data fetchers patched to use Alpaca (professional data)")
+    except Exception as e:
+        logger.warning(f"Could not patch for Alpaca: {e} — falling back to yfinance/cache")
+
 
 def retrain(models_to_train: list[str] = None):
     from config import Config
@@ -47,7 +88,10 @@ def retrain(models_to_train: list[str] = None):
     cfg = Config()
     start = time.time()
 
-    # ── Step 1: Fetch data (uses cache) ──────────────────────────────
+    # ── Patch data fetchers to use Alpaca if available ────────────────
+    _patch_for_alpaca()
+
+    # ── Step 1: Fetch data (uses Alpaca if keys available, else yfinance/cache)
     logger.info("Step 1: Fetching data...")
     tickers = get_universe(cfg.data)
     prices, volumes = fetch_price_data(tickers, cfg.data, cache_dir=cfg.data_dir)
