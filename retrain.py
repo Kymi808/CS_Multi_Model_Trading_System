@@ -77,6 +77,54 @@ def _patch_for_alpaca():
         data_loader.fetch_cross_asset_data = alpaca_cross_asset
         sentiment_features.fetch_news_sentiment = alpaca_sentiment
 
+        # Enhance sentiment with LLM analysis if Anthropic key available
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if anthropic_key and not anthropic_key.startswith("sk-ant-xxx"):
+            try:
+                from alpaca_adapter.news import (
+                    analyze_articles_batch, compute_llm_sentiment_features,
+                )
+                from alpaca_adapter.provider import AlpacaDataProvider
+
+                _base_sentiment = sentiment_features.fetch_news_sentiment
+
+                def _enhanced_sentiment(tickers, max_per_ticker=10, cache_dir="data"):
+                    base = _base_sentiment(tickers, max_per_ticker, cache_dir)
+                    # Ensure every ticker has base keys
+                    for t in tickers:
+                        if t not in base:
+                            base[t] = {
+                                "avg_sentiment": 0.0, "max_sentiment": 0.0,
+                                "min_sentiment": 0.0, "sentiment_std": 0.0,
+                                "n_articles": 0, "positive_ratio": 0.0, "negative_ratio": 0.0,
+                            }
+                    try:
+                        import asyncio
+
+                        async def _llm():
+                            provider = AlpacaDataProvider()
+                            articles = await provider.get_news(symbols=tickers[:30], limit=30)
+                            await provider.close()
+                            dicts = [{"headline": a.headline, "summary": a.summary,
+                                      "symbols": a.symbols, "source": a.source,
+                                      "created_at": a.created_at.isoformat()} for a in articles]
+                            return await analyze_articles_batch(dicts)
+
+                        analyses = asyncio.run(_llm())
+                        if analyses:
+                            for t in tickers:
+                                feats = compute_llm_sentiment_features(analyses, t)
+                                base[t].update(feats)
+                            logger.info(f"LLM sentiment added for {len(tickers)} tickers")
+                    except Exception as e:
+                        logger.debug(f"LLM sentiment skipped: {e}")
+                    return base
+
+                sentiment_features.fetch_news_sentiment = _enhanced_sentiment
+                logger.info("Sentiment enhanced with LLM (Claude Haiku)")
+            except Exception as e:
+                logger.debug(f"LLM sentiment not available: {e}")
+
         logger.info("Data fetchers patched to use Alpaca")
     except Exception as e:
         logger.warning(f"Could not patch for Alpaca: {e} — falling back to yfinance/cache")
