@@ -177,6 +177,21 @@ def build_all_features(
         all_feats.update(cross_asset_feats)
         logger.info(f"  + Cross-asset: {len(cross_asset_feats)} features")
 
+    # Add fractionally differentiated price features (López de Prado Ch. 5)
+    # These are stationary while preserving memory — better than raw returns
+    try:
+        from advanced_labeling import add_frac_diff_features
+        # Apply to a subset of stocks (top 20 by volume to save computation)
+        top_tickers = volumes.mean().nlargest(20).index.tolist()
+        frac_prices = prices[top_tickers] if top_tickers else prices.iloc[:, :20]
+        fd_feats = add_frac_diff_features(frac_prices, d=0.4)
+        if not fd_feats.empty:
+            for col in fd_feats.columns:
+                all_feats[("pv", col)] = fd_feats[[col]].reindex(prices.index)
+            logger.info(f"  + Fractional diff: {len(fd_feats.columns)} features")
+    except Exception as e:
+        logger.debug(f"Fractional differentiation skipped: {e}")
+
     # Combine into single DataFrame with MultiIndex columns
     panel = pd.concat(all_feats, axis=1)
     targets = compute_targets(prices, cfg)

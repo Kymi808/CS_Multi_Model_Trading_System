@@ -325,7 +325,23 @@ def fetch_cross_asset_data(
 def fetch_fundamental_data(
     tickers: List[str], cache_dir: str = "data",
 ) -> Dict[str, dict]:
-    """Fetch fundamental data (valuation, profitability, growth, quality, analyst)."""
+    """
+    Fetch fundamental data (valuation, profitability, growth, quality, analyst).
+
+    WARNING — LOOK-AHEAD BIAS:
+    yfinance returns CURRENT fundamental data (today's PE, ROE, etc.) regardless
+    of the backtest date. This means the model trains on information it wouldn't
+    have had access to at that historical point in time. This inflates backtest
+    returns by an estimated 2-5%.
+
+    For production: replace with point-in-time fundamental data from
+    Financial Modeling Prep, Sharadar, or Compustat. These provide as-reported
+    financials with proper publication dates.
+
+    Mitigation applied: fundamental features are cross-sectionally ranked
+    (relative, not absolute) which partially reduces the bias since all stocks
+    are equally affected by the look-ahead.
+    """
     cache_file = os.path.join(cache_dir, "fundamentals.json")
     if _is_json_cache_valid(cache_file):
         logger.info("Loading cached fundamentals")

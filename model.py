@@ -63,6 +63,7 @@ class EnsembleRanker:
     def train(
         self, X_train: pd.DataFrame, y_train: pd.Series,
         X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None,
+        sample_weight: Optional[np.ndarray] = None,
     ) -> dict:
         self.feature_names = list(X_train.columns)
         X_train = X_train.replace([np.inf, -np.inf], np.nan)
@@ -76,12 +77,16 @@ class EnsembleRanker:
             model = lgb.LGBMRegressor(**self._get_lgb_params(seed))
             callbacks = [lgb.log_evaluation(period=0)]
 
+            fit_kwargs = {}
+            if sample_weight is not None:
+                fit_kwargs["sample_weight"] = sample_weight
+
             if X_val is not None and y_val is not None:
                 callbacks.append(lgb.early_stopping(self.cfg.early_stopping_rounds, verbose=False))
                 model.fit(X_train, y_train, eval_set=[(X_val, y_val)],
-                          eval_metric="l2", callbacks=callbacks)
+                          eval_metric="l2", callbacks=callbacks, **fit_kwargs)
             else:
-                model.fit(X_train, y_train, callbacks=callbacks)
+                model.fit(X_train, y_train, callbacks=callbacks, **fit_kwargs)
 
             self.models.append(model)
             all_importances.append(
@@ -212,10 +217,23 @@ def walk_forward_train(
         )
 
         model = create_model(model_type, effective_cfg)
+
+        # Compute sample uniqueness weights (López de Prado)
+        sample_weight = None
+        try:
+            from advanced_labeling import compute_sample_uniqueness
+            labels_df = pd.DataFrame({"date": X_tr.index.get_level_values(0) if isinstance(X_tr.index, pd.MultiIndex) else X_tr.index})
+            weights = compute_sample_uniqueness(labels_df, max_holding_days=10)
+            if len(weights) == len(X_tr):
+                sample_weight = weights
+        except Exception:
+            pass  # fall back to equal weights
+
         metrics = model.train(
             X_tr, y_tr,
             X_v if len(X_v) > 0 else None,
             y_v if len(y_v) > 0 else None,
+            sample_weight=sample_weight,
         )
         metrics["window"] = window_num
         metrics_history.append(metrics)

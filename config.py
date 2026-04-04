@@ -73,7 +73,7 @@ class ModelConfig:
 
     # Walk-forward
     train_window_days: int = 504
-    retrain_every_days: int = 21
+    retrain_every_days: int = 14  # match 10-day prediction horizon (10 trading days = 14 calendar days)
     purge_gap_days: int = 10
     embargo_days: int = 5
 
@@ -153,9 +153,12 @@ class PortfolioConfig:
     max_daily_turnover: float = 0.40
     min_holding_days: int = 1
     turnover_penalty: float = 0.001
-    commission_bps: float = 0.5
-    slippage_bps: float = 3.0
-    spread_bps: float = 2.0
+    # Realistic transaction costs (conservative estimates for production)
+    # Alpaca is commission-free but has payment-for-order-flow spread costs
+    commission_bps: float = 1.0       # effective PFOF cost ~1bp
+    slippage_bps: float = 8.0        # realistic: 5-15bp depending on urgency/liquidity
+    spread_bps: float = 3.0          # typical bid-ask for liquid large-caps
+    # Total round-trip cost: ~24bp (12bp each way) — conservative but realistic
     weighting: str = "risk_parity"  # "equal", "score", "risk_parity"
 
 

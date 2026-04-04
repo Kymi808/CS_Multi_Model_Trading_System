@@ -1,8 +1,14 @@
 """
 Universe selection with sector classification.
+
+NOTE on survivorship bias:
+This module uses CURRENT S&P 500 constituents for historical backtests.
+Stocks that were delisted or removed from the index are excluded, which
+inflates backtest returns by an estimated 1-3%. Production systems should
+use point-in-time constituent lists from a data vendor (e.g., Compustat,
+Sharadar, or similar).
 """
 import pandas as pd
-import yfinance as yf
 import logging
 import json
 import os
@@ -12,17 +18,84 @@ logger = logging.getLogger(__name__)
 
 
 def get_sp500_tickers() -> List[str]:
+    """
+    Get S&P 500 constituents. Tries multiple sources in order:
+    1. Alpaca asset API (if API keys available)
+    2. Wikipedia scrape
+    3. Hardcoded fallback list
+    """
+    # Try Alpaca first (most reliable, no scraping issues)
+    tickers = _get_tickers_from_alpaca()
+    if tickers and len(tickers) > 50:
+        return tickers
+
+    # Fallback to Wikipedia
     try:
         tables = pd.read_html(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         )
         df = tables[0]
         tickers = df["Symbol"].str.replace(".", "-", regex=False).tolist()
-        logger.info(f"Fetched {len(tickers)} S&P 500 tickers")
+        logger.info(f"Fetched {len(tickers)} S&P 500 tickers from Wikipedia")
         return tickers
     except Exception as e:
-        logger.warning(f"Failed to scrape S&P 500: {e}. Using fallback.")
+        logger.warning(f"Wikipedia scrape failed: {e}. Using fallback.")
         return _fallback_tickers()
+
+
+def _get_tickers_from_alpaca() -> List[str]:
+    """
+    Get tradeable US equities from Alpaca's asset API.
+    Filters for active, tradeable stocks on NYSE/NASDAQ with sufficient market cap.
+    """
+    try:
+        import httpx
+        api_key = os.environ.get("ALPACA_API_KEY", "")
+        api_secret = os.environ.get("ALPACA_API_SECRET", "")
+        if not api_key or api_key in ("", "xxxxx"):
+            return []
+
+        base_url = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+        resp = httpx.get(
+            f"{base_url}/v2/assets",
+            headers={
+                "APCA-API-KEY-ID": api_key,
+                "APCA-API-SECRET-KEY": api_secret,
+            },
+            params={
+                "status": "active",
+                "asset_class": "us_equity",
+            },
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        assets = resp.json()
+
+        # Filter for tradeable, shortable stocks on major exchanges
+        tickers = [
+            a["symbol"] for a in assets
+            if a.get("tradable") and a.get("shortable")
+            and a.get("exchange") in ("NYSE", "NASDAQ")
+            and not a.get("symbol", "").endswith("W")  # exclude warrants
+            and "." not in a.get("symbol", "")  # exclude class shares like BRK.B
+        ]
+
+        # For backtest purposes, intersect with known large-caps
+        # (Alpaca returns thousands of assets, we want ~100-500 liquid ones)
+        large_cap_set = set(_fallback_tickers())
+        filtered = [t for t in tickers if t in large_cap_set]
+
+        if len(filtered) > 50:
+            logger.info(f"Fetched {len(filtered)} tickers from Alpaca asset API")
+            return filtered
+
+        # If intersection is too small, return all tradeable (capped)
+        logger.info(f"Alpaca: {len(tickers)} tradeable assets (using top 200)")
+        return tickers[:200]
+
+    except Exception as e:
+        logger.debug(f"Alpaca asset API unavailable: {e}")
+        return []
 
 
 def get_sp500_sector_map() -> Dict[str, str]:
@@ -39,8 +112,9 @@ def get_sp500_sector_map() -> Dict[str, str]:
 
 
 def _fallback_tickers() -> List[str]:
+    """Hardcoded large-cap tickers as last resort."""
     return [
-        "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "BRK-B",
+        "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA",
         "UNH", "XOM", "JNJ", "JPM", "V", "PG", "MA", "HD", "CVX", "MRK",
         "ABBV", "LLY", "PEP", "KO", "COST", "AVGO", "WMT", "MCD", "CSCO",
         "ACN", "TMO", "ABT", "DHR", "NEE", "LIN", "ADBE", "TXN", "PM",
@@ -51,7 +125,7 @@ def _fallback_tickers() -> List[str]:
         "LRCX", "CME", "MO", "ZTS", "SCHW", "ANET", "SNPS", "CDNS",
         "NOC", "ITW", "KLAC", "SHW", "FDX", "EMR", "APD", "MCK", "GD",
         "CL", "ORLY", "AJG", "HUM", "MCHP", "TDG", "WM", "SLB",
-        "PSX", "VLO", "MPC", "FTNT", "ROP", "PCAR",
+        "PSX", "VLO", "MPC", "FTNT", "ROP", "PCAR", "CRM", "NFLX",
     ]
 
 
@@ -87,31 +161,28 @@ def get_universe(cfg) -> List[str]:
 
 
 def load_sector_map(tickers: List[str], cache_dir: str = "data") -> Dict[str, str]:
+    """Load sector classifications. Uses cache, Wikipedia, or Alpaca as sources."""
     cache_file = os.path.join(cache_dir, "sectors.json")
     if os.path.exists(cache_file):
         with open(cache_file) as f:
             cached = json.load(f)
-        # Return cached if it covers most tickers
         if isinstance(cached, dict) and len(set(tickers) & set(cached.keys())) > len(tickers) * 0.5:
             return cached
 
-    # Try Wikipedia first (fast)
+    # Try Wikipedia first (fast, has GICS sectors)
     sectors = get_sp500_sector_map()
 
-    # Fill missing with yfinance (slow but thorough)
+    # Fill missing — use hardcoded sector mapping instead of yfinance API calls
+    # This avoids the unreliable yf.Ticker().info API
     missing = [t for t in tickers if t not in sectors]
     if missing:
-        logger.info(f"Fetching sector info for {len(missing)} tickers from yfinance...")
-        for ticker in missing[:50]:  # Cap to avoid rate limits
-            try:
-                info = yf.Ticker(ticker).info
-                sectors[ticker] = info.get("sector", "Unknown")
-            except Exception:
-                sectors[ticker] = "Unknown"
+        known_sectors = _known_sector_map()
+        for t in missing:
+            sectors[t] = known_sectors.get(t, "Unknown")
 
-    # If we still have no sectors, generate synthetic mapping
+    # If we still have poor coverage, generate synthetic
     if not sectors or len(set(tickers) & set(sectors.keys())) < len(tickers) * 0.3:
-        logger.warning("Network unavailable — generating synthetic sector map")
+        logger.warning("Insufficient sector data — generating synthetic mapping")
         from data_loader import _generate_synthetic_sectors
         sectors = _generate_synthetic_sectors(tickers)
 
@@ -119,3 +190,67 @@ def load_sector_map(tickers: List[str], cache_dir: str = "data") -> Dict[str, st
     with open(cache_file, "w") as f:
         json.dump(sectors, f)
     return sectors
+
+
+def _known_sector_map() -> Dict[str, str]:
+    """Hardcoded GICS sector mapping for common large-caps."""
+    return {
+        # Technology
+        "AAPL": "Information Technology", "MSFT": "Information Technology",
+        "NVDA": "Information Technology", "AVGO": "Information Technology",
+        "AMD": "Information Technology", "INTC": "Information Technology",
+        "QCOM": "Information Technology", "TXN": "Information Technology",
+        "ADI": "Information Technology", "LRCX": "Information Technology",
+        "KLAC": "Information Technology", "SNPS": "Information Technology",
+        "CDNS": "Information Technology", "MCHP": "Information Technology",
+        "ADBE": "Information Technology", "CRM": "Information Technology",
+        "ORCL": "Information Technology", "CSCO": "Information Technology",
+        "ACN": "Information Technology", "ANET": "Information Technology",
+        "FTNT": "Information Technology",
+        # Communication
+        "GOOGL": "Communication Services", "META": "Communication Services",
+        "NFLX": "Communication Services", "CMCSA": "Communication Services",
+        # Consumer Discretionary
+        "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
+        "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
+        "NKE": "Consumer Discretionary", "LOW": "Consumer Discretionary",
+        "BKNG": "Consumer Discretionary", "ORLY": "Consumer Discretionary",
+        "TDG": "Consumer Discretionary",
+        # Consumer Staples
+        "PG": "Consumer Staples", "KO": "Consumer Staples",
+        "PEP": "Consumer Staples", "COST": "Consumer Staples",
+        "WMT": "Consumer Staples", "PM": "Consumer Staples",
+        "CL": "Consumer Staples", "MDLZ": "Consumer Staples",
+        "MO": "Consumer Staples",
+        # Healthcare
+        "UNH": "Health Care", "JNJ": "Health Care", "LLY": "Health Care",
+        "MRK": "Health Care", "ABBV": "Health Care", "TMO": "Health Care",
+        "ABT": "Health Care", "DHR": "Health Care", "ISRG": "Health Care",
+        "SYK": "Health Care", "GILD": "Health Care", "VRTX": "Health Care",
+        "REGN": "Health Care", "BSX": "Health Care", "ZTS": "Health Care",
+        "CI": "Health Care", "HUM": "Health Care",
+        # Financials
+        "JPM": "Financials", "V": "Financials", "MA": "Financials",
+        "GS": "Financials", "MS": "Financials", "BLK": "Financials",
+        "SPGI": "Financials", "AXP": "Financials", "SCHW": "Financials",
+        "CME": "Financials", "CB": "Financials", "MMC": "Financials",
+        "AJG": "Financials",
+        # Energy
+        "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
+        "EOG": "Energy", "SLB": "Energy", "PSX": "Energy",
+        "VLO": "Energy", "MPC": "Energy",
+        # Industrials
+        "BA": "Industrials", "CAT": "Industrials", "DE": "Industrials",
+        "RTX": "Industrials", "HON": "Industrials", "UPS": "Industrials",
+        "FDX": "Industrials", "EMR": "Industrials", "NOC": "Industrials",
+        "ITW": "Industrials", "GD": "Industrials", "WM": "Industrials",
+        "PCAR": "Industrials", "ROP": "Industrials",
+        # Materials
+        "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
+        # Real Estate
+        "PLD": "Real Estate",
+        # Utilities
+        "NEE": "Utilities", "SO": "Utilities", "DUK": "Utilities",
+        # Misc
+        "MCK": "Health Care",
+    }

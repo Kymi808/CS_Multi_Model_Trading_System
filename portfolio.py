@@ -229,7 +229,19 @@ def compute_portfolio_returns(
 
         trades = target_weights.reindex(tickers, fill_value=0) - prev_weights.reindex(tickers, fill_value=0)
         turnover = trades.abs().sum()
-        tc = turnover * (cfg.commission_bps + cfg.slippage_bps + cfg.spread_bps) / 10000
+
+        # Volatility-dependent slippage: higher vol = wider spreads + more slippage
+        # Base cost from config, scaled by recent realized vol vs long-run avg
+        base_cost_bps = cfg.commission_bps + cfg.slippage_bps + cfg.spread_bps
+        vol_scale = 1.0
+        if len(results) >= 20:
+            recent_rets = [r["gross_return"] for r in results[-5:]]
+            long_rets = [r["gross_return"] for r in results[-63:]]
+            recent_vol = np.std(recent_rets) if len(recent_rets) > 1 else 0
+            long_vol = np.std(long_rets) if len(long_rets) > 1 else recent_vol
+            if long_vol > 0:
+                vol_scale = max(1.0, min(3.0, recent_vol / long_vol))
+        tc = turnover * base_cost_bps * vol_scale / 10000
 
         results.append({
             "date": date,

@@ -189,21 +189,34 @@ class FactorRiskModel:
 
     def update_regime(self, prices: pd.DataFrame):
         """
-        Weak regime overlay: 50d/200d MA trend filter.
-        
-        Positive score = bullish (scale up longs, scale down shorts)
-        Negative score = bearish (scale down longs, scale up shorts)
-        Max effect: 15% bias either direction.
+        Multi-speed regime detector combining fast and slow signals.
+
+        Uses three timeframes to avoid the pure lag of 50/200 MA:
+        1. Fast (5d/20d) — catches regime shifts early, but noisy
+        2. Medium (20d/50d) — confirms emerging trend
+        3. Slow (50d/200d) — confirms established trend
+
+        Final score = weighted blend: fast 0.2, medium 0.3, slow 0.5
+        This reacts faster than pure 50/200 while staying stable.
         """
         mkt = prices.mean(axis=1)
-        ma200 = mkt.rolling(200, min_periods=100).mean()
-        ma50 = mkt.rolling(50, min_periods=30).mean()
-        if ma200.iloc[-1] > 0:
-            self.regime_score = float(
-                np.clip(ma50.iloc[-1] / ma200.iloc[-1] - 1, -0.1, 0.1)
-            )
-        else:
-            self.regime_score = 0.0
+
+        def _ma_score(fast_period, slow_period, min_fast, min_slow):
+            ma_fast = mkt.rolling(fast_period, min_periods=min_fast).mean()
+            ma_slow = mkt.rolling(slow_period, min_periods=min_slow).mean()
+            if ma_slow.iloc[-1] > 0:
+                return float(np.clip(ma_fast.iloc[-1] / ma_slow.iloc[-1] - 1, -0.1, 0.1))
+            return 0.0
+
+        fast_score = _ma_score(5, 20, 5, 15)
+        medium_score = _ma_score(20, 50, 15, 30)
+        slow_score = _ma_score(50, 200, 30, 100)
+
+        # Weighted blend: fast reacts quickly, slow provides anchor
+        self.regime_score = float(np.clip(
+            fast_score * 0.2 + medium_score * 0.3 + slow_score * 0.5,
+            -0.1, 0.1,
+        ))
 
     def apply_regime_overlay(self, weights: pd.Series) -> pd.Series:
         """Apply weak regime bias to portfolio weights."""
@@ -223,6 +236,40 @@ class FactorRiskModel:
 
         return weights
 
+    def compute_tail_risk_scale(self, portfolio_returns) -> float:
+        """
+        Tail risk protection: detect market stress via recent return distribution.
+
+        Checks for:
+        - Gap-down days (daily return < -3%)
+        - Elevated recent volatility (5d vol > 2x 63d vol)
+        - Consecutive down days (3+ in a row)
+
+        Returns a scaling factor (0.3 to 1.0) to reduce exposure during stress.
+        """
+        if not hasattr(portfolio_returns, '__len__') or len(portfolio_returns) < 10:
+            return 1.0
+
+        recent = portfolio_returns[-5:]  # last 5 days
+        lookback = portfolio_returns[-63:] if len(portfolio_returns) >= 63 else portfolio_returns
+
+        # Check for recent gap-down (any day < -3%)
+        if any(r < -0.03 for r in recent):
+            return 0.5  # cut exposure by half after a gap-down
+
+        # Check for vol spike (5d realized vol > 2x 63d realized vol)
+        if len(recent) >= 5 and len(lookback) >= 20:
+            recent_vol = float(np.std(recent)) * np.sqrt(252)
+            long_vol = float(np.std(lookback)) * np.sqrt(252)
+            if long_vol > 0 and recent_vol / long_vol > 2.0:
+                return 0.6  # reduce by 40% during vol spikes
+
+        # Check for 3+ consecutive down days
+        if len(recent) >= 3 and all(r < 0 for r in recent[-3:]):
+            return 0.7  # reduce by 30% during persistent selling
+
+        return 1.0
+
     def apply_risk_scaling(self, weights, portfolio_returns, sector_map,
                            n_long: int = 15, n_short: int = 7):
         """
@@ -231,13 +278,15 @@ class FactorRiskModel:
         2. Factor neutralization
         3. Vol targeting
         4. Drawdown control
-        5. Re-clip to n_long/n_short (prevents position drift)
-        6. Regime overlay (after clip so it gets full effect)
+        5. Tail risk protection (gap-down, vol spike, consecutive losses)
+        6. Re-clip to n_long/n_short (prevents position drift)
+        7. Regime overlay (after clip so it gets full effect)
         """
         weights = self.apply_sector_neutrality(weights, sector_map)
         weights = self.neutralize_factors(weights)
         weights *= self.compute_vol_scale(portfolio_returns)
         weights *= self.compute_drawdown_scale()
+        weights *= self.compute_tail_risk_scale(portfolio_returns)
 
         # Re-clip positions (factor/sector neutralization can expand beyond target)
         if len(weights[weights > 0]) > n_long:
