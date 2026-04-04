@@ -7,6 +7,9 @@ on:
     - cron: '0 6 1,15 * *'  # 6 AM UTC on 1st and 15th of each month
   workflow_dispatch:  # manual trigger button in GitHub UI
 
+permissions:
+  contents: write
+
 jobs:
   retrain:
     runs-on: ubuntu-latest
@@ -16,7 +19,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -28,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Kymi808/openclaw-fintech
-          path: ../VSNX/openclaw-fintech
+          path: openclaw-fintech
           token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true  # works without OpenClaw, just uses yfinance
 
@@ -48,10 +52,10 @@ jobs:
         run: |
           python retrain.py --models crossmamba,lightgbm
         env:
-          # Yahoo Finance doesn't need keys
-          # Alpaca keys for universe fetching (optional)
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENCLAW_PATH: ${{ github.workspace }}/openclaw-fintech
 
       - name: Verify models load
         run: |
