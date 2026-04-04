@@ -31,15 +31,20 @@ logger = logging.getLogger("retrain")
 def _fix_for_pickle(data: dict) -> dict:
     """
     Fix StringDtype indexes before pickling.
-    GitHub Actions uses newer pandas that creates StringDtype indexes.
-    Older pandas on Mac can't unpickle these. Convert to plain object dtype.
+    GitHub Actions uses newer pandas that creates StringDtype indexes by default.
+    Older pandas on Mac can't unpickle these. Force object dtype explicitly.
     """
     import pandas as pd
+    import numpy as np
+
     if "feature_importance" in data and isinstance(data["feature_importance"], pd.Series):
         fi = data["feature_importance"]
+        # Force object dtype — pd.Index(strings) creates StringDtype on newer pandas
+        # but np.array(strings, dtype=object) guarantees plain object dtype
+        idx = np.array([str(x) for x in fi.index], dtype=object)
         data["feature_importance"] = pd.Series(
-            fi.values,
-            index=pd.Index([str(x) for x in fi.index]),
+            fi.values.copy(),
+            index=pd.Index(idx, dtype=object),
             name=fi.name,
         )
     if "feature_names" in data:
