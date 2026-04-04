@@ -82,5 +82,6 @@ jobs:
             echo "No model changes to commit"
           else
             git commit -m "Automated retrain: CrossMamba + LightGBM ($(date +%Y-%m-%d))"
+            git pull --rebase origin main
             git push
           fi
