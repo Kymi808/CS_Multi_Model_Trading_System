@@ -28,19 +28,10 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Checkout OpenClaw (for Alpaca data adapter)
-        uses: actions/checkout@v4
-        with:
-          repository: Kymi808/openclaw-fintech
-          path: openclaw-fintech
-          token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true  # works without OpenClaw, just uses yfinance
-
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # Install OpenClaw deps for Alpaca adapter
-          pip install httpx nest_asyncio python-dotenv || true
+          pip install httpx nest_asyncio || true
 
       - name: Clear stale cache data
         run: |
@@ -54,8 +45,6 @@ jobs:
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENCLAW_PATH: ${{ github.workspace }}/openclaw-fintech
 
       - name: Verify models load
         run: |

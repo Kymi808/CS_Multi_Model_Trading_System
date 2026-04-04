@@ -51,34 +51,20 @@ def _fix_for_pickle(data: dict) -> dict:
         data["feature_names"] = [str(f) for f in data["feature_names"]]
     return data
 
-# Path to OpenClaw (for Alpaca data adapter)
-OPENCLAW_PATH = os.environ.get(
-    "OPENCLAW_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "VSNX", "openclaw-fintech"),
-)
 
 
 def _patch_for_alpaca():
     """
-    Replace yfinance data fetchers with Alpaca adapter if available.
-    This ensures retraining uses professional data, not yfinance scraping.
+    Replace yfinance data fetchers with local Alpaca adapter.
+    No OpenClaw dependency — uses alpaca_adapter/ in this repo.
     """
     alpaca_key = os.environ.get("ALPACA_API_KEY", "")
     if not alpaca_key or alpaca_key in ("", "xxxxx"):
         logger.info("Alpaca not configured — using yfinance/cache for data")
         return
 
-    # Add OpenClaw to path for the adapter
-    if os.path.exists(OPENCLAW_PATH):
-        import sys
-        if OPENCLAW_PATH not in sys.path:
-            sys.path.insert(0, OPENCLAW_PATH)
-    else:
-        logger.info(f"OpenClaw not found at {OPENCLAW_PATH} — using yfinance/cache")
-        return
-
     try:
-        from skills.market_data.adapter import (
+        from alpaca_adapter import (
             fetch_price_data as alpaca_prices,
             fetch_cross_asset_data as alpaca_cross_asset,
             fetch_news_sentiment as alpaca_sentiment,
@@ -91,48 +77,7 @@ def _patch_for_alpaca():
         data_loader.fetch_cross_asset_data = alpaca_cross_asset
         sentiment_features.fetch_news_sentiment = alpaca_sentiment
 
-        # Also enhance sentiment with LLM analysis when Anthropic key available
-        try:
-            anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if anthropic_key and not anthropic_key.startswith("sk-ant-xxx"):
-                from skills.news.llm_sentiment import (
-                    analyze_articles_batch, compute_llm_sentiment_features,
-                )
-                _base_sentiment = sentiment_features.fetch_news_sentiment
-
-                def _enhanced_sentiment(tickers, max_per_ticker=10, cache_dir="data"):
-                    base = _base_sentiment(tickers, max_per_ticker, cache_dir)
-                    try:
-                        import asyncio
-                        from skills.market_data import get_data_provider
-
-                        async def _llm():
-                            provider = get_data_provider()
-                            articles = await provider.get_news(symbols=tickers[:30], limit=30)
-                            dicts = [{"headline": a.headline, "summary": a.summary,
-                                      "symbols": a.symbols, "source": a.source,
-                                      "created_at": a.created_at.isoformat()} for a in articles]
-                            return await analyze_articles_batch(dicts)
-
-                        analyses = asyncio.run(_llm())
-                        if analyses:
-                            for t in tickers:
-                                feats = compute_llm_sentiment_features(analyses, t)
-                                if t in base:
-                                    base[t].update(feats)
-                                else:
-                                    base[t] = feats
-                            logger.info(f"LLM sentiment added for {len(tickers)} tickers")
-                    except Exception as e:
-                        logger.debug(f"LLM sentiment skipped: {e}")
-                    return base
-
-                sentiment_features.fetch_news_sentiment = _enhanced_sentiment
-                logger.info("Sentiment enhanced with LLM (Claude Haiku)")
-        except Exception:
-            pass
-
-        logger.info("Data fetchers patched to use Alpaca + LLM sentiment")
+        logger.info("Data fetchers patched to use Alpaca")
     except Exception as e:
         logger.warning(f"Could not patch for Alpaca: {e} — falling back to yfinance/cache")
 
