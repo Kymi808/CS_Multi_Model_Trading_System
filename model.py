@@ -44,7 +44,7 @@ class EnsembleRanker:
         self.feature_importance: Optional[pd.Series] = None
 
     def _get_lgb_params(self, seed: int) -> dict:
-        return {
+        params = {
             "n_estimators": self.cfg.n_estimators,
             "max_depth": self.cfg.max_depth,
             "learning_rate": self.cfg.learning_rate,
@@ -59,6 +59,15 @@ class EnsembleRanker:
             "n_jobs": -1,
             "verbose": -1,
         }
+        # Use GPU if available (CUDA-compatible LightGBM)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                params["device"] = "gpu"
+                params["gpu_use_dp"] = False  # single precision is fine for ranking
+        except ImportError:
+            pass
+        return params
 
     def train(
         self, X_train: pd.DataFrame, y_train: pd.Series,
@@ -178,6 +187,25 @@ def walk_forward_train(
     all_preds = []
     metrics_history = []
 
+    # Pre-compute date-to-index mapping for O(1) lookups instead of O(n) isin()
+    if isinstance(X.index, pd.MultiIndex):
+        date_level = X.index.get_level_values(0)
+        date_to_mask = {}
+        for d in dates:
+            date_to_mask[d] = date_level == d
+    else:
+        date_to_mask = None
+
+    def _select_by_dates(df, date_list):
+        """Fast date-based selection using pre-computed masks."""
+        if date_to_mask is not None:
+            mask = np.zeros(len(df), dtype=bool)
+            for d in date_list:
+                if d in date_to_mask:
+                    mask |= date_to_mask[d]
+            return df.iloc[mask]
+        return df.loc[date_list]
+
     for i in range(0, len(dates) - train_window, retrain_every):
         train_end = i + train_window - purge
         val_start = i + train_window - purge + embargo
@@ -195,16 +223,11 @@ def walk_forward_train(
         if len(train_dates) < 100 or not pred_dates:
             continue
 
-        if isinstance(X.index, pd.MultiIndex):
-            X_tr = X.loc[X.index.get_level_values(0).isin(train_dates)]
-            y_tr = y.loc[y.index.isin(X_tr.index)]
-            X_v = X.loc[X.index.get_level_values(0).isin(val_dates)]
-            y_v = y.loc[y.index.isin(X_v.index)]
-            X_p = X.loc[X.index.get_level_values(0).isin(pred_dates)]
-        else:
-            X_tr = X.loc[train_dates]; y_tr = y.loc[train_dates]
-            X_v = X.loc[val_dates]; y_v = y.loc[val_dates]
-            X_p = X.loc[pred_dates]
+        X_tr = _select_by_dates(X, train_dates)
+        y_tr = y.loc[X_tr.index]
+        X_v = _select_by_dates(X, val_dates)
+        y_v = y.loc[X_v.index] if len(X_v) > 0 else pd.Series(dtype=float)
+        X_p = _select_by_dates(X, pred_dates)
 
         if len(X_tr) < 100 or len(X_p) == 0:
             continue
@@ -218,16 +241,13 @@ def walk_forward_train(
 
         model = create_model(model_type, effective_cfg)
 
-        # Compute sample uniqueness weights (López de Prado)
+        # Sample weights: simple temporal decay (fast, no expensive computation)
         sample_weight = None
-        try:
-            from advanced_labeling import compute_sample_uniqueness
-            labels_df = pd.DataFrame({"date": X_tr.index.get_level_values(0) if isinstance(X_tr.index, pd.MultiIndex) else X_tr.index})
-            weights = compute_sample_uniqueness(labels_df, max_holding_days=10)
-            if len(weights) == len(X_tr):
-                sample_weight = weights
-        except Exception:
-            pass  # fall back to equal weights
+        if len(X_tr) > 100:
+            # More recent samples get higher weight (exponential decay)
+            n = len(X_tr)
+            sample_weight = np.exp(np.linspace(-1, 0, n))  # oldest=0.37, newest=1.0
+            sample_weight = sample_weight * n / sample_weight.sum()  # normalize to mean=1
 
         metrics = model.train(
             X_tr, y_tr,
