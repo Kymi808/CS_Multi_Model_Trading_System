@@ -121,13 +121,48 @@ def cross_sectional_ranks(
 
 # ===== TARGET =====
 
-def compute_targets(prices: pd.DataFrame, cfg: FeatureConfig) -> Dict[str, pd.DataFrame]:
+def compute_targets(
+    prices: pd.DataFrame,
+    cfg: FeatureConfig,
+    sector_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Compute prediction targets with institutional-grade construction.
+
+    Three target types:
+    1. Raw forward return rank (original)
+    2. Risk-adjusted forward return (return / trailing vol) — Grinold & Kahn
+    3. Industry-relative forward return (stock return - sector avg) — removes sector noise
+    """
     lr = _log_returns(prices)
     targets = {}
+
     for h in cfg.target_horizons:
         fwd = lr.shift(-h).rolling(h).sum()
         targets[f"fwd_ret_{h}d"] = fwd
         targets[f"fwd_rank_{h}d"] = fwd.rank(axis=1, pct=True)
+
+        # Risk-adjusted target: forward return / trailing volatility
+        # Grinold & Kahn: predicting risk-adjusted returns is more stable
+        trailing_vol = lr.rolling(63).std() * np.sqrt(252)
+        trailing_vol = trailing_vol.replace(0, np.nan).fillna(method="ffill")
+        risk_adj = fwd / (trailing_vol + 1e-8)
+        targets[f"fwd_risk_adj_{h}d"] = risk_adj.rank(axis=1, pct=True)
+
+        # Industry-relative target: stock return minus sector average
+        # Removes sector rotation noise — isolates stock-specific alpha
+        if sector_map:
+            sector_df = pd.Series(sector_map)
+            ind_rel = fwd.copy()
+            for sector in sector_df.unique():
+                sector_stocks = sector_df[sector_df == sector].index
+                sector_cols = [c for c in fwd.columns if c in sector_stocks]
+                if len(sector_cols) > 1:
+                    sector_avg = fwd[sector_cols].mean(axis=1)
+                    for col in sector_cols:
+                        ind_rel[col] = fwd[col] - sector_avg
+            targets[f"fwd_ind_rel_{h}d"] = ind_rel.rank(axis=1, pct=True)
+
     return targets
 
 
@@ -139,6 +174,9 @@ def build_all_features(
     cfg: FeatureConfig,
     fundamental_feats: Optional[Dict] = None,
     cross_asset_feats: Optional[Dict] = None,
+    insider_feats: Optional[Dict] = None,
+    fmp_feats: Optional[Dict] = None,
+    sector_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
     Build complete feature panel combining all signal sources.
@@ -192,9 +230,35 @@ def build_all_features(
     except Exception as e:
         logger.debug(f"Fractional differentiation skipped: {e}")
 
+    # Add insider features (SEC Form 4 data)
+    if insider_feats:
+        all_feats.update(insider_feats)
+        logger.info(f"  + Insider: {len(insider_feats)} features")
+
+    # Add FMP fundamental features (point-in-time, no look-ahead)
+    if fmp_feats:
+        all_feats.update(fmp_feats)
+        logger.info(f"  + FMP fundamentals: {len(fmp_feats)} features")
+
+    # Add interaction features (institutional cross-factor combinations)
+    # Must come AFTER all base features are computed
+    try:
+        from interaction_features import build_interaction_features
+        # Separate sentiment features if mixed into cross_asset_feats
+        sent_feats_dict = {k: v for k, v in (cross_asset_feats or {}).items()
+                          if isinstance(k, tuple) and k[0] == "sent"}
+        interact_feats = build_interaction_features(
+            pv_feats, fundamental_feats, cross_asset_feats, sent_feats_dict,
+        )
+        if interact_feats:
+            all_feats.update(interact_feats)
+            logger.info(f"  + Interactions: {len(interact_feats)} features")
+    except Exception as e:
+        logger.debug(f"Interaction features skipped: {e}")
+
     # Combine into single DataFrame with MultiIndex columns
     panel = pd.concat(all_feats, axis=1)
-    targets = compute_targets(prices, cfg)
+    targets = compute_targets(prices, cfg, sector_map=sector_map)
 
     logger.info(f"Total panel: {panel.shape} ({len(all_feats)} feature groups)")
     return panel, targets

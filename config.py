@@ -12,8 +12,13 @@ class DataConfig:
     custom_tickers: List[str] = field(default_factory=list)
     lookback_years: int = 5
     min_history_days: int = 252
-    min_avg_dollar_volume: float = 5_000_000
+    min_avg_dollar_volume: float = 10_000_000  # raised from 5M for institutional liquidity
     max_missing_pct: float = 0.10
+    target_universe_size: int = 300  # expanded from ~100 for better cross-sectional signal
+    fmp_api_key: str = ""  # Financial Modeling Prep (set via FMP_API_KEY env var)
+
+    def __post_init__(self):
+        self.fmp_api_key = os.environ.get("FMP_API_KEY", self.fmp_api_key)
 
     # Cross-asset tickers for macro regime signals
     cross_asset_tickers: List[str] = field(default_factory=lambda: [
@@ -53,6 +58,10 @@ class FeatureConfig:
     # Target
     target_horizons: List[int] = field(default_factory=lambda: [1, 5, 10, 21])
     primary_target_horizon: int = 10  # 10d better for fundamental signals
+    target_type: str = "risk_adjusted"  # "raw_rank", "risk_adjusted", "industry_relative"
+
+    # Feature selection
+    max_features: int = 65  # raised from 50 to accommodate interaction + new features
 
 
 @dataclass

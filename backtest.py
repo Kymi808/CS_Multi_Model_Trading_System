@@ -209,27 +209,66 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
     logger.info(f"Cross-asset signals: {len(ca_feats)}")
 
     # ==================================================================
-    # 6. BUILD ALL FEATURES
+    # 5.5 INSIDER TRADING DATA (SEC Form 4)
     # ==================================================================
-    _log_step(6, "Feature engineering")
+    _log_step(5.5, "Insider trading data")
+    try:
+        from insider_features import fetch_insider_data, build_insider_features
+        insider_data = fetch_insider_data(tickers, cache_dir=cfg.data_dir)
+        insider_feats = build_insider_features(insider_data, prices, fundamentals)
+        logger.info(f"Insider signals: {len(insider_feats)}")
+    except Exception as e:
+        logger.info(f"Insider features skipped: {e}")
+        insider_feats = {}
+
+    # ==================================================================
+    # 5.6 FMP POINT-IN-TIME FUNDAMENTALS
+    # ==================================================================
+    _log_step(5.6, "FMP fundamentals (point-in-time)")
+    try:
+        from fmp_features import fetch_fmp_fundamentals, build_fmp_features
+        fmp_data = fetch_fmp_fundamentals(tickers, cfg.data.fmp_api_key, cfg.data_dir)
+        fmp_feats = build_fmp_features(fmp_data, prices)
+        logger.info(f"FMP signals: {len(fmp_feats)}")
+    except Exception as e:
+        logger.info(f"FMP features skipped: {e}")
+        fmp_feats = {}
+
+    # ==================================================================
+    # 6. BUILD ALL FEATURES (with interactions + new data sources)
+    # ==================================================================
+    _log_step(6, "Feature engineering (with institutional interactions)")
     features, targets = build_all_features(
         prices, volumes, cfg.features,
         fundamental_feats=fund_feats,
         cross_asset_feats={**sent_feats, **ca_feats},
+        insider_feats=insider_feats,
+        fmp_feats=fmp_feats,
+        sector_map=sector_map,
     )
     h = cfg.features.primary_target_horizon
-    target_key = f"fwd_rank_{h}d"
+
+    # Select target based on config (risk-adjusted is default)
+    target_type = getattr(cfg.features, "target_type", "raw_rank")
+    if target_type == "risk_adjusted":
+        target_key = f"fwd_risk_adj_{h}d"
+    elif target_type == "industry_relative" and sector_map:
+        target_key = f"fwd_ind_rel_{h}d"
+    else:
+        target_key = f"fwd_rank_{h}d"
+
     target = targets.get(target_key, targets.get(f"fwd_ret_{h}d"))
     logger.info(f"Target: {target_key}")
 
     X, y = panel_to_ml_format(features, target)
 
     # ==================================================================
-    # 7. FEATURE SELECTION — stability-based
+    # 7. FEATURE SELECTION — stability-based (expanded cap for new features)
     # ==================================================================
     _log_step(7, "Feature selection (stability-based)")
+    max_feats = getattr(cfg.features, "max_features", 65)
     selected_features = select_features_by_ic(
-        X, y, max_features=50, min_abs_ic=0.005, n_splits=3,
+        X, y, max_features=max_feats, min_abs_ic=0.005, n_splits=3,
     )
     X = X[selected_features]
 

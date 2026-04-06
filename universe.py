@@ -80,18 +80,20 @@ def _get_tickers_from_alpaca() -> List[str]:
             and "." not in a.get("symbol", "")  # exclude class shares like BRK.B
         ]
 
-        # For backtest purposes, intersect with known large-caps
-        # (Alpaca returns thousands of assets, we want ~100-500 liquid ones)
-        large_cap_set = set(_fallback_tickers())
-        filtered = [t for t in tickers if t in large_cap_set]
+        # Expanded universe: use ALL tradeable/shortable stocks from major exchanges
+        # Downstream liquidity filter (min_avg_dollar_volume) handles the rest
+        # This gives us 300-500 liquid names instead of ~100
+        max_universe = 500
+        known = set(_fallback_tickers())
 
-        if len(filtered) > 50:
-            logger.info(f"Fetched {len(filtered)} tickers from Alpaca asset API")
-            return filtered
+        # Priority: known large-caps first, then remaining Alpaca assets
+        prioritized = [t for t in tickers if t in known]
+        remaining = [t for t in tickers if t not in known]
+        combined = prioritized + remaining
 
-        # If intersection is too small, return all tradeable (capped)
-        logger.info(f"Alpaca: {len(tickers)} tradeable assets (using top 200)")
-        return tickers[:200]
+        result = combined[:max_universe]
+        logger.info(f"Fetched {len(result)} tickers from Alpaca ({len(prioritized)} known + {len(remaining[:max_universe-len(prioritized)])} additional)")
+        return result
 
     except Exception as e:
         logger.debug(f"Alpaca asset API unavailable: {e}")
@@ -112,20 +114,67 @@ def get_sp500_sector_map() -> Dict[str, str]:
 
 
 def _fallback_tickers() -> List[str]:
-    """Hardcoded large-cap tickers as last resort."""
+    """Expanded large/mid-cap universe (~300 names) for better cross-sectional signal."""
     return [
+        # Mega-cap (top 30)
         "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA",
         "UNH", "XOM", "JNJ", "JPM", "V", "PG", "MA", "HD", "CVX", "MRK",
         "ABBV", "LLY", "PEP", "KO", "COST", "AVGO", "WMT", "MCD", "CSCO",
-        "ACN", "TMO", "ABT", "DHR", "NEE", "LIN", "ADBE", "TXN", "PM",
-        "CMCSA", "NKE", "RTX", "HON", "ORCL", "COP", "UPS", "LOW", "QCOM",
-        "BA", "SPGI", "CAT", "INTC", "AMD", "GS", "MS", "BLK", "DE",
-        "AXP", "MDLZ", "ISRG", "ADI", "SYK", "GILD", "BKNG", "VRTX",
-        "REGN", "MMC", "PLD", "CB", "CI", "SO", "DUK", "EOG", "BSX",
-        "LRCX", "CME", "MO", "ZTS", "SCHW", "ANET", "SNPS", "CDNS",
-        "NOC", "ITW", "KLAC", "SHW", "FDX", "EMR", "APD", "MCK", "GD",
-        "CL", "ORLY", "AJG", "HUM", "MCHP", "TDG", "WM", "SLB",
-        "PSX", "VLO", "MPC", "FTNT", "ROP", "PCAR", "CRM", "NFLX",
+        "ACN", "TMO", "ABT", "CRM",
+        # Large-cap (next 70)
+        "DHR", "NEE", "LIN", "ADBE", "TXN", "PM", "CMCSA", "NKE", "RTX",
+        "HON", "ORCL", "COP", "UPS", "LOW", "QCOM", "BA", "SPGI", "CAT",
+        "INTC", "AMD", "GS", "MS", "BLK", "DE", "AXP", "MDLZ", "ISRG",
+        "ADI", "SYK", "GILD", "BKNG", "VRTX", "REGN", "PLD", "CB",
+        "CI", "SO", "DUK", "EOG", "BSX", "LRCX", "CME", "MO", "ZTS",
+        "SCHW", "ANET", "SNPS", "CDNS", "NOC", "ITW", "KLAC", "SHW",
+        "FDX", "EMR", "APD", "MCK", "GD", "CL", "ORLY", "AJG", "HUM",
+        "MCHP", "TDG", "WM", "SLB", "PSX", "VLO", "MPC", "FTNT", "ROP",
+        "PCAR", "NFLX",
+        # Mid-cap expansion (next 200 — Russell 1000 names)
+        "ABNB", "ACGL", "AFL", "AIG", "AIZ", "AJG", "ALL", "AMGN", "AMP",
+        "AMT", "ANSS", "AON", "AOS", "APA", "APH", "APTV", "ARE", "ATO",
+        "ATVI", "AWK", "AZO", "BAX", "BBY", "BDX", "BEN", "BF-B",
+        "BIO", "BKR", "BR", "BRO", "BWA", "CAG", "CARR", "CBOE", "CBRE",
+        "CCI", "CE", "CF", "CHD", "CHRW", "CINF", "CLX", "CMS", "CNP",
+        "COO", "CPRT", "CRL", "CSCO", "CSGP", "CSX", "CTAS", "CTLT",
+        "CTSH", "CTVA", "CVS", "D", "DAL", "DD", "DELL", "DFS",
+        "DG", "DGX", "DHI", "DXCM", "EA", "EBAY", "ECL", "ED",
+        "EFX", "EIX", "EL", "EMN", "ENPH", "EOG", "EPAM", "EQIX",
+        "EQR", "EQT", "ES", "ESS", "ETN", "ETR", "EVRG", "EW",
+        "EXC", "EXPD", "EXPE", "EXR", "F", "FANG", "FAST", "FBHS",
+        "FCX", "FDS", "FICO", "FIS", "FISV", "FLT", "FMC",
+        "FOX", "FOXA", "FRC", "FRT", "FTNT", "GE", "GEHC", "GEN",
+        "GILD", "GIS", "GL", "GLW", "GM", "GNRC", "GPC", "GPN",
+        "GRMN", "GWW", "HAL", "HAS", "HBAN", "HCA", "HOLX",
+        "HPE", "HPQ", "HSIC", "HST", "HSY", "HWM", "IBM", "ICE",
+        "IDXX", "IEX", "IFF", "ILMN", "INCY", "IP", "IPG", "IQV",
+        "IR", "IRM", "IT", "JBHT", "JCI", "JKHY", "JNPR",
+        "K", "KDP", "KEY", "KEYS", "KHC", "KIM", "KMB", "KMI",
+        "KMX", "KR", "L", "LDOS", "LEN", "LH", "LHX",
+        "LKQ", "LMT", "LNT", "LUV", "LVS", "LW", "LYB", "LYV",
+        "MAA", "MAR", "MAS", "MKC", "MKTX", "MLM", "MOH",
+        "MPWR", "MRO", "MSCI", "MSI", "MTB", "MTCH", "MTD",
+        "MU", "NDAQ", "NDSN", "NEM", "NI", "NRG",
+        "NSC", "NTAP", "NTRS", "NUE", "NVR", "NWL", "NWS",
+        "O", "ODFL", "OKE", "OMC", "ON", "OTIS", "OXY",
+        "PARA", "PAYC", "PAYX", "PCAR", "PCG", "PEAK", "PEG",
+        "PFE", "PFG", "PGR", "PH", "PHM", "PKG", "PKI", "PNC",
+        "PNR", "PNW", "POOL", "PPG", "PPL", "PRU", "PTC",
+        "PVH", "PWR", "PXD", "PYPL", "QRVO",
+        "RCL", "RE", "REG", "RF", "RHI", "RJF", "RL",
+        "RMD", "ROK", "ROL", "ROST", "RSG",
+        "SBAC", "SBUX", "SEDG", "SEE", "SJM", "SNA", "SNPS",
+        "SPG", "SRE", "STE", "STT", "STX", "STZ", "SWK",
+        "SWKS", "SYF", "SYY", "T", "TAP", "TDY", "TECH", "TEL",
+        "TER", "TFC", "TFX", "TRGP", "TRMB", "TROW", "TRV",
+        "TSCO", "TSN", "TT", "TTWO", "TXT", "TYL",
+        "UAL", "UDR", "UHS", "ULTA", "URI", "USB",
+        "VFC", "VICI", "VLO", "VMC", "VRSK", "VRSN", "VRTX",
+        "VTR", "VTRS", "VZ", "WAB", "WAT", "WBA", "WBD",
+        "WDC", "WEC", "WELL", "WFC", "WHR", "WRB", "WRK",
+        "WST", "WTW", "WY", "WYNN", "XEL", "XYL",
+        "YUM", "ZBH", "ZBRA", "ZION",
     ]
 
 
