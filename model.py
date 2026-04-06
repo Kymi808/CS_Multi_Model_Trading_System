@@ -268,15 +268,9 @@ def walk_forward_train(
             # so they can build sequences for the first prediction dates
             if model_type in ("tst", "crossmamba"):
                 seq_len = getattr(effective_cfg, "sequence_length", 21)
-                if isinstance(X.index, pd.MultiIndex):
-                    # Get dates before pred_dates for context
-                    context_start = max(0, pred_start - seq_len)
-                    context_dates = dates[context_start:pred_end]
-                    X_p_ctx = X.loc[X.index.get_level_values(0).isin(context_dates)]
-                else:
-                    context_start = max(0, pred_start - seq_len)
-                    context_dates = dates[context_start:pred_end]
-                    X_p_ctx = X.loc[context_dates]
+                context_start = max(0, pred_start - seq_len)
+                context_dates = dates[context_start:pred_end]
+                X_p_ctx = _select_by_dates(X, context_dates)
                 preds = model.predict(X_p_ctx)
                 # Only keep predictions for actual pred_dates
                 if isinstance(preds.index, pd.MultiIndex):
