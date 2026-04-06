@@ -192,6 +192,14 @@ class TSTRanker:
                 dropout=self.cfg.dropout,
             ).to(self.device)
 
+            # JIT compile for GPU acceleration (PyTorch 2.x)
+            if self.device.type == "cuda":
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                    logger.info(f"  TST compiled with torch.compile")
+                except Exception:
+                    pass
+
             optimizer = torch.optim.AdamW(
                 model.parameters(),
                 lr=self.cfg.learning_rate,
