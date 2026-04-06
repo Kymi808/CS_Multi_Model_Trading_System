@@ -249,11 +249,16 @@ def walk_forward_train(
             sample_weight = np.exp(np.linspace(-1, 0, n))  # oldest=0.37, newest=1.0
             sample_weight = sample_weight * n / sample_weight.sum()  # normalize to mean=1
 
+        # Only LightGBM supports sample_weight — TST/CrossMamba don't
+        train_kwargs = {}
+        if model_type == "lightgbm" and sample_weight is not None:
+            train_kwargs["sample_weight"] = sample_weight
+
         metrics = model.train(
             X_tr, y_tr,
             X_v if len(X_v) > 0 else None,
             y_v if len(y_v) > 0 else None,
-            sample_weight=sample_weight,
+            **train_kwargs,
         )
         metrics["window"] = window_num
         metrics_history.append(metrics)
