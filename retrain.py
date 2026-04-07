@@ -185,17 +185,67 @@ def retrain(models_to_train: list[str] = None):
     sect_etf = ca_prices[[c for c in cfg.data.sector_etfs if c in ca_prices.columns]] if not ca_prices.empty else pd.DataFrame()
     ca_feats = build_cross_asset_features(ca_only, prices, sect_etf, sector_map, cfg.features.cross_asset_windows)
 
-    # ── Step 2: Build features ───────────────────────────────────────
+    # ── Step 2a: Additional data sources ────────────────────────────
+    insider_feats = {}
+    try:
+        from insider_features import fetch_insider_data, build_insider_features
+        insider_data = fetch_insider_data(tickers, cache_dir=cfg.data_dir)
+        insider_feats = build_insider_features(insider_data, prices, fundamentals)
+        logger.info(f"  Insider signals: {len(insider_feats)}")
+    except Exception as e:
+        logger.debug(f"Insider features skipped: {e}")
+
+    fmp_feats = {}
+    try:
+        from fmp_features import fetch_fmp_fundamentals, build_fmp_features
+        fmp_data = fetch_fmp_fundamentals(tickers, cfg.data.fmp_api_key, cfg.data_dir)
+        fmp_feats = build_fmp_features(fmp_data, prices)
+        logger.info(f"  FMP signals: {len(fmp_feats)}")
+    except Exception as e:
+        logger.debug(f"FMP features skipped: {e}")
+
+    openbb_feats = {}
+    try:
+        from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
+        options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir)
+        short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir)
+        openbb_feats = build_openbb_features(options_data, short_data, prices)
+        logger.info(f"  OpenBB signals: {len(openbb_feats)}")
+    except Exception as e:
+        logger.debug(f"OpenBB features skipped: {e}")
+
+    # ── Step 2b: Build features ──────────────────────────────────────
     logger.info("Step 2: Building features...")
-    features, targets = build_all_features(prices, volumes, cfg.features, fund_feats, ca_feats)
-    target = targets[f"fwd_ret_{cfg.features.primary_target_horizon}d"]
+    features, targets = build_all_features(
+        prices, volumes, cfg.features,
+        fundamental_feats=fund_feats,
+        cross_asset_feats={**sent_feats, **ca_feats},
+        insider_feats=insider_feats,
+        fmp_feats=fmp_feats,
+        openbb_feats=openbb_feats,
+        sector_map=sector_map,
+    )
+
+    # Use risk-adjusted target (matches backtest)
+    h = cfg.features.primary_target_horizon
+    target_type = getattr(cfg.features, "target_type", "risk_adjusted")
+    if target_type == "risk_adjusted":
+        target_key = f"fwd_risk_adj_{h}d"
+    elif target_type == "industry_relative" and sector_map:
+        target_key = f"fwd_ind_rel_{h}d"
+    else:
+        target_key = f"fwd_rank_{h}d"
+    target = targets.get(target_key, targets.get(f"fwd_ret_{h}d"))
+    logger.info(f"  Target: {target_key}")
+
     X, y = panel_to_ml_format(features, target)
     logger.info(f"  ML dataset: {X.shape[0]} samples, {X.shape[1]} features")
 
     # ── Step 3: Feature selection ────────────────────────────────────
     logger.info("Step 3: Feature selection...")
     from backtest import select_features_by_ic
-    selected = select_features_by_ic(X, y, max_features=50, min_abs_ic=0.005, n_splits=3)
+    max_feats = getattr(cfg.features, "max_features", 65)
+    selected = select_features_by_ic(X, y, max_features=max_feats, min_abs_ic=0.005, n_splits=3)
     X = X[selected]
     logger.info(f"  Selected {len(selected)} features")
 
