@@ -65,10 +65,9 @@ def fetch_insider_data(
     if fmp_key and fmp_key not in ("", "xxxxx"):
         insider_data = _fetch_from_fmp(tickers, fmp_key, lookback_days)
 
-    # Fallback to synthetic
     if not insider_data:
-        logger.info("Generating synthetic insider data (no FMP key or fetch failed)")
-        insider_data = _generate_synthetic_insider(tickers)
+        logger.warning("No insider data available (no FMP key or fetch failed)")
+        return {}
 
     # Cache
     os.makedirs(cache_dir, exist_ok=True)
@@ -84,37 +83,42 @@ def fetch_insider_data(
 def _fetch_from_fmp(
     tickers: List[str], api_key: str, lookback_days: int,
 ) -> Dict[str, dict]:
-    """Fetch insider transactions from Financial Modeling Prep."""
+    """Fetch insider transactions from FMP /stable/ API."""
     import httpx
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    data = {}
-    for ticker in tickers[:50]:  # limit to avoid rate limits
+    def _fetch_one(ticker):
         try:
             resp = httpx.get(
-                f"https://financialmodelingprep.com/api/v4/insider-trading",
-                params={"symbol": ticker, "apikey": api_key, "limit": 50},
+                "https://financialmodelingprep.com/stable/insider-trading/search",
+                params={"symbol": ticker, "apikey": api_key, "limit": 50, "page": 0},
                 timeout=10.0,
             )
             if resp.status_code != 200:
-                continue
-
-            transactions = resp.json()
+                return None
+            transactions = resp.json() or []
             if not transactions:
-                continue
+                return None
 
-            n_buys = sum(1 for t in transactions if t.get("transactionType") == "P-Purchase")
-            n_sells = sum(1 for t in transactions if t.get("transactionType") == "S-Sale")
+            def _is_buy(t):
+                tt = (t.get("transactionType", "") or "").lower()
+                return "purchase" in tt or tt == "p-purchase"
+
+            def _is_sell(t):
+                tt = (t.get("transactionType", "") or "").lower()
+                return "sale" in tt or tt == "s-sale"
+
+            n_buys = sum(1 for t in transactions if _is_buy(t))
+            n_sells = sum(1 for t in transactions if _is_sell(t))
             buy_value = sum(
-                abs(float(t.get("securitiesTransacted", 0)) * float(t.get("price", 0)))
-                for t in transactions if t.get("transactionType") == "P-Purchase"
+                abs(float(t.get("securitiesTransacted", 0) or 0) * float(t.get("price", 0) or 0))
+                for t in transactions if _is_buy(t)
             )
             distinct_buyers = len(set(
-                t.get("reportingName", "") for t in transactions
-                if t.get("transactionType") == "P-Purchase"
+                t.get("reportingName", "") for t in transactions if _is_buy(t)
             ))
-
             total = n_buys + n_sells
-            data[ticker] = {
+            return {
                 "n_buys": n_buys,
                 "n_sells": n_sells,
                 "net_buy_ratio": n_buys / total if total > 0 else 0.5,
@@ -122,8 +126,19 @@ def _fetch_from_fmp(
                 "n_distinct_buyers": distinct_buyers,
             }
         except Exception:
-            continue
+            return None
 
+    data = {}
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        future_to_ticker = {pool.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                result = future.result()
+                if result:
+                    data[ticker] = result
+            except Exception:
+                pass
     return data
 
 

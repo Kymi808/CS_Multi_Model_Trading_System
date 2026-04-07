@@ -450,7 +450,8 @@ def fetch_fmp_fundamentals(
             pass
 
     if not api_key or api_key in ("", "xxxxx"):
-        return _generate_synthetic_fmp(tickers)
+        logger.info("No FMP API key — skipping earnings alpha features")
+        return {}
 
     def _fetch_one_earnings(ticker: str) -> Optional[list]:
         try:

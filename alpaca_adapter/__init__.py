@@ -118,13 +118,8 @@ def fetch_price_data(
             logger.info(f"Cached: {prices.shape}")
             return prices, volumes
 
-    # Fallback: synthetic data (same as original)
-    logger.warning("Alpaca fetch returned insufficient data — generating synthetic")
-    from .synthetic import generate_synthetic_prices
-    prices, volumes = generate_synthetic_prices(tickers, start_date, end_date)
-    prices.to_csv(cache_px)
-    volumes.to_csv(cache_vol)
-    return prices, volumes
+    # No synthetic fallback — raise so caller can handle
+    raise RuntimeError("Alpaca fetch returned insufficient price data")
 
 
 def fetch_cross_asset_data(
@@ -195,12 +190,7 @@ def fetch_cross_asset_data(
             ca.to_csv(cache_file)
             return ca
 
-    logger.warning("Alpaca cross-asset fetch failed — generating synthetic")
-    from .synthetic import generate_synthetic_cross_asset
-    ca = generate_synthetic_cross_asset(tickers, start_date, end_date)
-    os.makedirs(cache_dir, exist_ok=True)
-    ca.to_csv(cache_file)
-    return ca
+    raise RuntimeError("Alpaca cross-asset fetch returned insufficient data")
 
 
 def fetch_news_sentiment(
