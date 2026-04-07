@@ -26,7 +26,11 @@ from fundamental_features import build_fundamental_features
 from cross_asset_features import build_cross_asset_features
 from sentiment_features import fetch_news_sentiment, build_sentiment_features
 from features import build_all_features, panel_to_ml_format
-from fmp_features import fetch_fmp_fundamentals, build_fmp_features
+from fmp_features import (
+    fetch_fmp_fundamental_data, fetch_fmp_historical_fundamentals,
+    get_pit_fundamentals, fetch_fmp_fundamentals, build_fmp_features,
+)
+from fmp_data_provider import build_premium_features, fetch_bulk_fundamentals
 from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
 from model import EnsembleRanker
 from risk_model import FactorRiskModel
@@ -59,13 +63,26 @@ class SignalGenerator:
         self.constructor: Optional[PortfolioConstructor] = None
         self.selected_features: list = []
         self.sector_map: dict = {}
+        self.fundamentals: dict = {}
+        self.prices: Optional[pd.DataFrame] = None
         self.prev_weights: pd.Series = pd.Series(dtype=float)
         self.portfolio_returns: pd.Series = pd.Series(dtype=float)
 
     def load_model(self, model_path: str = "models/latest_model.pkl"):
         """Load trained model from backtest."""
-        self.model = EnsembleRanker(self.cfg.model)
-        self.model.load(model_path)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}. "
+                f"Run 'python retrain.py' or 'python main.py backtest' first."
+            )
+        try:
+            self.model = EnsembleRanker(self.cfg.model)
+            self.model.load(model_path)
+        except (pickle.UnpicklingError, KeyError, EOFError, ModuleNotFoundError) as e:
+            raise RuntimeError(
+                f"Model file corrupt or incompatible: {model_path}. "
+                f"Re-run 'python retrain.py' to regenerate. Error: {e}"
+            ) from e
         logger.info(f"Loaded model: {len(self.model.models)} models, "
                     f"{len(self.model.feature_names)} features")
         self.selected_features = self.model.feature_names
@@ -107,6 +124,7 @@ class SignalGenerator:
         prices = prices[[t for t in tickers if t in prices.columns]]
         volumes = volumes[[t for t in tickers if t in volumes.columns]]
         tickers = list(prices.columns)
+        self.prices = prices
         info["n_tickers"] = len(tickers)
         logger.info(f"Universe: {len(tickers)} tickers")
 
@@ -114,9 +132,25 @@ class SignalGenerator:
         logger.info("Fetching sectors...")
         self.sector_map = load_sector_map(tickers, cache_dir=self.cfg.data_dir)
 
-        # 3. Fundamentals
+        # 3. Fundamentals (FMP bulk primary — 2 API calls for all tickers)
         logger.info("Fetching fundamentals...")
-        fundamentals = fetch_fundamental_data(tickers, cache_dir=self.cfg.data_dir)
+        fundamentals = None
+        if self.cfg.data.fmp_api_key:
+            try:
+                fundamentals = fetch_bulk_fundamentals(
+                    tickers, self.cfg.data.fmp_api_key, self.cfg.data_dir,
+                )
+                if fundamentals and len(fundamentals) > len(tickers) * 0.3:
+                    logger.info(f"Using FMP bulk fundamentals ({len(fundamentals)} tickers)")
+                else:
+                    fundamentals = None
+            except Exception as e:
+                logger.warning(f"FMP bulk fundamentals failed: {e}")
+                fundamentals = None
+        if fundamentals is None:
+            logger.warning("Using yfinance fundamentals (KNOWN LOOK-AHEAD BIAS in backtest)")
+            fundamentals = fetch_fundamental_data(tickers, cache_dir=self.cfg.data_dir)
+        self.fundamentals = fundamentals
         earnings_dates = fetch_earnings_dates(tickers, cache_dir=self.cfg.data_dir)
         fund_feats = build_fundamental_features(
             fundamentals, prices, earnings_dates, self.sector_map,
@@ -172,6 +206,17 @@ class SignalGenerator:
         except Exception as e:
             logger.debug(f"Insider features skipped: {e}")
 
+        # 5e. Premium FMP features (analyst estimates, Piotroski, Claude sentiment, etc.)
+        premium_feats = {}
+        try:
+            premium_feats = build_premium_features(
+                tickers, prices, self.cfg.data.fmp_api_key, self.cfg.data_dir,
+            )
+            if premium_feats:
+                logger.info(f"Premium features: {len(premium_feats)} signals")
+        except Exception as e:
+            logger.debug(f"Premium features skipped: {e}")
+
         # 6. Build features
         logger.info("Building features...")
         features, targets = build_all_features(
@@ -181,6 +226,7 @@ class SignalGenerator:
             insider_feats=insider_feats,
             fmp_feats=fmp_feats,
             openbb_feats=openbb_feats,
+            premium_feats=premium_feats,
             sector_map=self.sector_map,
         )
 
@@ -212,6 +258,20 @@ class SignalGenerator:
 
         # Reorder to match model's expected feature order
         X_latest = X_latest[self.selected_features]
+
+        # Data quality gate
+        nan_pct_per_col = X_latest.isna().mean()
+        high_nan_cols = nan_pct_per_col[nan_pct_per_col > 0.50]
+        if len(high_nan_cols) > 0:
+            logger.warning(f"{len(high_nan_cols)} features have >50% NaN: "
+                           f"{list(high_nan_cols.index[:5])}")
+        total_nan_pct = X_latest.isna().mean().mean()
+        if total_nan_pct > 0.30:
+            raise RuntimeError(
+                f"Data quality check failed: {total_nan_pct:.1%} of feature values are NaN. "
+                f"Check data pipeline. Refusing to generate predictions."
+            )
+        info["data_quality_nan_pct"] = float(total_nan_pct)
 
         # Fill NaN with cross-sectional median (same as backtest)
         for col in X_latest.columns:
@@ -270,6 +330,26 @@ class SignalGenerator:
 
         logger.info(f"Portfolio: {info['n_long']}L / {info['n_short']}S, "
                     f"net={info['net_exposure']:.1%}, gross={info['gross_exposure']:.1%}")
+
+        # Log predictions for accuracy tracking (predicted vs realized)
+        try:
+            pred_log = {
+                "date": str(latest_date.date()) if hasattr(latest_date, 'date') else str(latest_date),
+                "predictions": {str(k): float(v) for k, v in predictions.items()},
+                "target_weights": {str(k): float(v) for k, v in target_weights.items()},
+                "regime_score": float(info.get("regime_score", 0)),
+                "data_quality_nan_pct": info.get("data_quality_nan_pct", 0),
+            }
+            os.makedirs(self.cfg.results_dir, exist_ok=True)
+            pred_path = os.path.join(
+                self.cfg.results_dir,
+                f"predictions_{latest_date.strftime('%Y%m%d') if hasattr(latest_date, 'strftime') else latest_date}.json",
+            )
+            with open(pred_path, "w") as f:
+                json.dump(pred_log, f, indent=2)
+            logger.info(f"Predictions logged to {pred_path}")
+        except Exception as e:
+            logger.warning(f"Failed to log predictions: {e}")
 
         return target_weights, info
 

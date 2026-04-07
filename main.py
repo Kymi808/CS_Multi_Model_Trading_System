@@ -95,7 +95,10 @@ def cmd_compare(args):
     from cross_asset_features import build_cross_asset_features
     from sentiment_features import fetch_news_sentiment, build_sentiment_features
     from features import build_all_features, panel_to_ml_format
-    from fmp_features import fetch_fmp_fundamentals, build_fmp_features
+    from fmp_features import (
+        fetch_fmp_fundamental_data, fetch_fmp_historical_fundamentals,
+        get_pit_fundamentals, fetch_fmp_fundamentals, build_fmp_features,
+    )
     from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
     from backtest import select_features_by_ic
     from model_comparison import (
@@ -137,8 +140,32 @@ def cmd_compare(args):
     # 2. Sectors
     sector_map = load_sector_map(tickers, cache_dir=cfg.data_dir)
 
-    # 3. Fundamentals
-    fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
+    # 3. Fundamentals (FMP historical quarterly with filing dates for backtest)
+    # For backtest, we fetch all quarterly records with filingDate, then
+    # fundamental_features.py uses the latest filed data at each point in time.
+    # This eliminates look-ahead bias (the #1 issue from senior partner review).
+    fmp_historical = None
+    fundamentals = None
+    if cfg.data.fmp_api_key:
+        try:
+            fmp_historical = fetch_fmp_historical_fundamentals(
+                tickers, cfg.data.fmp_api_key, cfg.data_dir,
+            )
+            if fmp_historical and len(fmp_historical) > len(tickers) * 0.3:
+                # Use latest filed data as of today for the static feature pass
+                # (walk-forward windows will call get_pit_fundamentals per window)
+                fundamentals = get_pit_fundamentals(
+                    fmp_historical, datetime.now().strftime("%Y-%m-%d"),
+                )
+                logger.info(f"Using FMP point-in-time fundamentals ({len(fundamentals)} tickers, "
+                            f"{len(fmp_historical)} with history)")
+            else:
+                fmp_historical = None
+        except Exception as e:
+            logger.warning(f"FMP fundamentals failed: {e}")
+    if fundamentals is None:
+        logger.warning("Using yfinance fundamentals (KNOWN LOOK-AHEAD BIAS)")
+        fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
     earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
     fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
 
@@ -157,8 +184,13 @@ def cmd_compare(args):
     ca_feats = build_cross_asset_features(ca_only, prices, sect_etf, sector_map, cfg.features.cross_asset_windows)
 
     # 5b. FMP point-in-time fundamentals (earnings revisions, surprise, PE)
-    fmp_data = fetch_fmp_fundamentals(tickers, api_key=cfg.data.fmp_api_key, cache_dir=cfg.data_dir)
-    fmp_feats = build_fmp_features(fmp_data, prices)
+    fmp_feats = {}
+    try:
+        fmp_data = fetch_fmp_fundamentals(tickers, api_key=cfg.data.fmp_api_key, cache_dir=cfg.data_dir)
+        fmp_feats = build_fmp_features(fmp_data, prices)
+        logger.info(f"FMP features: {len(fmp_feats)} signals")
+    except Exception as e:
+        logger.warning(f"FMP features skipped: {e}")
 
     # 5c. OpenBB alternative data (production-only — skipped in backtest to prevent leakage)
     options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir, live_mode=False)
@@ -174,6 +206,16 @@ def cmd_compare(args):
     except Exception as e:
         logger.debug(f"Insider features skipped: {e}")
 
+    # 5e. Premium FMP features (analyst estimates, Piotroski, Claude sentiment)
+    premium_feats = {}
+    try:
+        from fmp_data_provider import build_premium_features
+        premium_feats = build_premium_features(tickers, prices, cfg.data.fmp_api_key, cfg.data_dir)
+        if premium_feats:
+            logger.info(f"Premium features: {len(premium_feats)} signals")
+    except Exception as e:
+        logger.debug(f"Premium features skipped: {e}")
+
     # 6. Feature engineering
     features, targets = build_all_features(
         prices, volumes, cfg.features,
@@ -182,6 +224,7 @@ def cmd_compare(args):
         insider_feats=insider_feats,
         fmp_feats=fmp_feats,
         openbb_feats=openbb_feats,
+        premium_feats=premium_feats,
         sector_map=sector_map,
     )
     h = cfg.features.primary_target_horizon
@@ -346,8 +389,25 @@ def cmd_trade(args):
     executor = AlpacaExecutor(
         cfg.execution.api_key, cfg.execution.api_secret, paper=paper,
     )
+    if not executor.health_check():
+        print("\n  Alpaca API unreachable. Check API keys and network.")
+        logger.error("Alpaca health check failed — aborting trade execution")
+        return
     account = executor.get_account()
     print(f"\nAccount equity: ${account['equity']:,.2f}")
+
+    # Pre-trade risk checks
+    gross_exposure = info.get("gross_exposure", 0)
+    if gross_exposure > cfg.portfolio.max_gross_leverage:
+        print(f"\n  Gross exposure {gross_exposure:.2f} exceeds limit "
+              f"{cfg.portfolio.max_gross_leverage:.2f}. Aborting.")
+        return
+
+    pred_std = info.get("pred_std", 0)
+    if pred_std < 1e-6:
+        print("\n  Prediction dispersion near zero — model may have failed. Aborting.")
+        logger.error(f"Prediction std={pred_std:.8f}, refusing to trade on flat predictions")
+        return
 
     # 3. Show current vs target
     current = executor.get_positions()
@@ -387,10 +447,46 @@ def cmd_trade(args):
 
     # Save trade log
     import json
+    os.makedirs("results", exist_ok=True)
     log_path = f"results/trades_{datetime.now():%Y%m%d_%H%M%S}.json"
     with open(log_path, "w") as f:
         json.dump(results, f, indent=2)
     logger.info(f"Trade log: {log_path}")
+
+    # Factor attribution (decompose today's portfolio into factor contributions)
+    try:
+        from factor_attribution import FactorAttribution
+        attrib = FactorAttribution()
+        if sig.prices is not None and len(sig.prices) > 1:
+            stock_returns = sig.prices.pct_change().iloc[-1]
+            factor_exposures = (
+                sig.risk.factor_exposures
+                if hasattr(sig.risk, "factor_exposures") and sig.risk.factor_exposures is not None
+                else None
+            )
+            attr = attrib.attribute_day(
+                date=info.get("date"),
+                weights=target_weights,
+                stock_returns=stock_returns,
+                factor_exposures=factor_exposures,
+            )
+            print(f"\nFactor Attribution:")
+            print(f"  Alpha:    {attr.alpha_return:+.4%}")
+            for factor, contrib in attr.factor_contributions.items():
+                print(f"  {factor:<12s} {contrib:+.4%}")
+            attr_path = f"results/attribution_{datetime.now():%Y%m%d}.json"
+            with open(attr_path, "w") as f:
+                json.dump({
+                    "date": attr.date,
+                    "total_return": attr.total_return,
+                    "alpha_return": attr.alpha_return,
+                    "factor_contributions": attr.factor_contributions,
+                    "top_contributors": attr.top_contributors,
+                    "bottom_contributors": attr.bottom_contributors,
+                }, f, indent=2)
+            logger.info(f"Attribution saved to {attr_path}")
+    except Exception as e:
+        logger.warning(f"Factor attribution failed: {e}")
 
 
 def generate_plots(results: "pd.DataFrame", summary: dict):
