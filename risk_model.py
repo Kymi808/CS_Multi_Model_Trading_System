@@ -26,7 +26,22 @@ class FactorRiskModel:
         self.specific_variance: Optional[pd.Series] = None
         self.cum_returns: list = []
         self.peak_equity: float = 1.0
-        self.regime_score: float = 0.0  # Current market regime
+        self.regime_score: float = 0.0
+        self.regime_state = None  # HMM regime state (full probabilities)
+
+        # Initialize HMM regime detector
+        self.hmm_detector = None
+        hmm_enabled = getattr(cfg, "hmm_enabled", True)
+        if hmm_enabled:
+            try:
+                from hmm_regime import HMMRegimeDetector
+                self.hmm_detector = HMMRegimeDetector(
+                    n_states=getattr(cfg, "hmm_n_states", 3),
+                    refit_every=getattr(cfg, "hmm_refit_every", 63),
+                    min_train_days=getattr(cfg, "hmm_min_train_days", 504),
+                )
+            except ImportError:
+                pass  # hmmlearn not installed
 
     def estimate(
         self, prices: pd.DataFrame, fundamentals: Dict[str, dict],
@@ -187,18 +202,33 @@ class FactorRiskModel:
     def update(self, daily_return):
         self.cum_returns.append(daily_return)
 
-    def update_regime(self, prices: pd.DataFrame):
+    def update_regime(self, prices: pd.DataFrame, cross_asset_prices: pd.DataFrame = None):
         """
-        Multi-speed regime detector combining fast and slow signals.
+        Regime detection with HMM (primary) and MA crossover (fallback).
 
-        Uses three timeframes to avoid the pure lag of 50/200 MA:
-        1. Fast (5d/20d) — catches regime shifts early, but noisy
-        2. Medium (20d/50d) — confirms emerging trend
-        3. Slow (50d/200d) — confirms established trend
+        HMM: 3-state Gaussian model trained on macro observables.
+        Provides probability distribution over bull/sideways/bear.
 
-        Final score = weighted blend: fast 0.2, medium 0.3, slow 0.5
-        This reacts faster than pure 50/200 while staying stable.
+        MA fallback: multi-speed blend (5/20, 20/50, 50/200) when HMM
+        is unavailable or undertrained.
         """
+        # Try HMM first (institutional standard)
+        if self.hmm_detector is not None and cross_asset_prices is not None:
+            obs = self.hmm_detector.prepare_observations(cross_asset_prices)
+            if len(obs) >= self.hmm_detector.min_train_days:
+                if self.hmm_detector.should_refit(len(obs)):
+                    self.hmm_detector.fit(obs)
+                if self.hmm_detector.model is not None:
+                    state = self.hmm_detector.predict(obs)
+                    self.regime_score = state.regime_score
+                    self.regime_state = state
+                    return
+
+        # Fallback: multi-speed MA crossover
+        self._update_regime_ma(prices)
+
+    def _update_regime_ma(self, prices: pd.DataFrame):
+        """MA-based regime detection fallback."""
         mkt = prices.mean(axis=1)
 
         def _ma_score(fast_period, slow_period, min_fast, min_slow):
@@ -212,7 +242,6 @@ class FactorRiskModel:
         medium_score = _ma_score(20, 50, 15, 30)
         slow_score = _ma_score(50, 200, 30, 100)
 
-        # Weighted blend: fast reacts quickly, slow provides anchor
         self.regime_score = float(np.clip(
             fast_score * 0.2 + medium_score * 0.3 + slow_score * 0.5,
             -0.1, 0.1,

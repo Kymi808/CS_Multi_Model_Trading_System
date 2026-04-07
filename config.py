@@ -148,6 +148,11 @@ class RiskConfig:
     vol_scale_floor: float = 0.3
     max_drawdown_threshold: float = -0.08
     drawdown_scale_factor: float = 0.5
+    # HMM regime detection (Hamilton 1989)
+    hmm_enabled: bool = True
+    hmm_n_states: int = 3           # bull, sideways, bear
+    hmm_refit_every: int = 63       # quarterly refit
+    hmm_min_train_days: int = 504   # 2 years minimum data
 
 
 @dataclass

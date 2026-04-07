@@ -8,3 +8,4 @@ optuna>=3.4.0
 lxml>=4.9.0
 alpaca-py>=0.21.0
 torch>=2.0.0
+hmmlearn>=0.3.0
