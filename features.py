@@ -246,21 +246,20 @@ def build_all_features(
         all_feats.update(openbb_feats)
         logger.info(f"  + OpenBB: {len(openbb_feats)} features")
 
-    # Add interaction features (institutional cross-factor combinations)
-    # Must come AFTER all base features are computed
-    try:
-        from interaction_features import build_interaction_features
-        # Separate sentiment features if mixed into cross_asset_feats
-        sent_feats_dict = {k: v for k, v in (cross_asset_feats or {}).items()
-                          if isinstance(k, tuple) and k[0] == "sent"}
-        interact_feats = build_interaction_features(
-            pv_feats, fundamental_feats, cross_asset_feats, sent_feats_dict,
-        )
-        if interact_feats:
-            all_feats.update(interact_feats)
-            logger.info(f"  + Interactions: {len(interact_feats)} features")
-    except Exception as e:
-        logger.debug(f"Interaction features skipped: {e}")
+    # Interaction features disabled — Run 1 (3.39 Sharpe) did not use them.
+    # Enable after isolating FMP impact. To re-enable, uncomment below:
+    # try:
+    #     from interaction_features import build_interaction_features
+    #     sent_feats_dict = {k: v for k, v in (cross_asset_feats or {}).items()
+    #                       if isinstance(k, tuple) and k[0] == "sent"}
+    #     interact_feats = build_interaction_features(
+    #         pv_feats, fundamental_feats, cross_asset_feats, sent_feats_dict,
+    #     )
+    #     if interact_feats:
+    #         all_feats.update(interact_feats)
+    #         logger.info(f"  + Interactions: {len(interact_feats)} features")
+    # except Exception as e:
+    #     logger.debug(f"Interaction features skipped: {e}")
 
     # Combine into single DataFrame with MultiIndex columns
     panel = pd.concat(all_feats, axis=1)
