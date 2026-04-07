@@ -8,6 +8,7 @@ optuna>=3.4.0
 lxml>=4.9.0
 alpaca-py>=0.21.0
 httpx>=0.24.0
+anthropic>=0.39.0
 torch>=2.0.0
 hmmlearn>=0.3.0
 # Optional: mamba-ssm for 10-50x faster CrossMamba on GPU
