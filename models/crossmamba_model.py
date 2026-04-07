@@ -100,6 +100,7 @@ class SelectiveSSM(nn.Module):
 
         return self.out_proj(y)
 
+    @torch.amp.custom_fwd(device_type="cuda", cast_output=torch.float16)
     def _selective_scan(self, x, A, B, C, delta):
         """
         Run selective scan across the sequence.
@@ -108,7 +109,18 @@ class SelectiveSSM(nn.Module):
         Three implementations in priority order:
         1. Vectorized parallel scan (PyTorch, GPU-optimized, no extra deps)
         2. Sequential fallback (CPU, always works)
+
+        Note: Runs in fp32 internally even under autocast. The exp() and
+        iterative accumulation in the scan lose precision in fp16.
+        Output is cast back to fp16 for the rest of the network.
         """
+        # Force fp32 for numerical stability in recurrence
+        x = x.float()
+        A = A.float()
+        B = B.float()
+        C = C.float()
+        delta = delta.float()
+
         batch, seq_len, d_model = x.shape
         d_state = self.d_state
 
