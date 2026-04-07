@@ -412,6 +412,49 @@ def fetch_fundamental_data(
     return fundamentals
 
 
+def _fetch_earnings_dates_fmp(
+    tickers: List[str], api_key: str,
+) -> Dict[str, List[str]]:
+    """Fetch earnings dates from FMP /stable/earnings (parallel)."""
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    def _fetch_one(ticker: str):
+        try:
+            resp = httpx.get(
+                "https://financialmodelingprep.com/stable/earnings",
+                params={"symbol": ticker, "apikey": api_key},
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json() or []
+            dates = [r["date"] for r in data if r.get("date")][:8]
+            return dates if dates else None
+        except Exception:
+            return None
+
+    earnings = {}
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        future_to_ticker = {pool.submit(_fetch_one, t): t for t in tickers}
+        for i, future in enumerate(as_completed(future_to_ticker)):
+            ticker = future_to_ticker[future]
+            if (i + 1) % 50 == 0:
+                logger.info(f"  Earnings dates (FMP): {i + 1}/{len(tickers)} ({len(earnings)} OK)")
+            try:
+                dates = future.result()
+                if dates:
+                    earnings[ticker] = dates
+            except Exception:
+                pass
+
+    logger.info(f"Earnings dates (FMP): {len(earnings)}/{len(tickers)} tickers")
+    return earnings
+
+
 def fetch_earnings_dates(
     tickers: List[str], cache_dir: str = "data",
 ) -> Dict[str, List[str]]:
@@ -421,23 +464,49 @@ def fetch_earnings_dates(
         with open(cache_file) as f:
             return json.load(f)
 
-    logger.info(f"Fetching earnings dates for {len(tickers)} tickers...")
+    # Try FMP first (parallel, ~20 sec for 445 tickers vs ~11 min yfinance)
+    fmp_key = os.environ.get("FMP_API_KEY", "")
     earnings = {}
-    try:
-        import yfinance as yf
-        for i, ticker in enumerate(tickers):
-            if i % 30 == 0 and i > 0:
-                logger.info(f"  Earnings dates: {i}/{len(tickers)}")
-            try:
-                t = yf.Ticker(ticker)
-                cal = t.earnings_dates
-                if cal is not None and len(cal) > 0:
-                    dates = [str(d.date()) for d in cal.index[:8]]
-                    earnings[ticker] = dates
-            except Exception:
-                continue
-    except Exception as e:
-        logger.warning(f"yfinance earnings dates failed: {e}")
+    if fmp_key and fmp_key not in ("", "xxxxx"):
+        earnings = _fetch_earnings_dates_fmp(tickers, fmp_key)
+
+    # Fallback to yfinance for tickers FMP missed
+    missing = [t for t in tickers if t not in earnings]
+    if missing and len(missing) > len(tickers) * 0.5:
+        logger.info(f"FMP covered {len(earnings)} tickers, fetching {len(missing)} from yfinance...")
+        try:
+            import yfinance as yf
+            for i, ticker in enumerate(missing):
+                if i % 30 == 0 and i > 0:
+                    logger.info(f"  Earnings dates (yfinance): {i}/{len(missing)}")
+                try:
+                    t = yf.Ticker(ticker)
+                    cal = t.earnings_dates
+                    if cal is not None and len(cal) > 0:
+                        dates = [str(d.date()) for d in cal.index[:8]]
+                        earnings[ticker] = dates
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"yfinance earnings dates failed: {e}")
+    elif not earnings:
+        # No FMP key, full yfinance
+        logger.info(f"Fetching earnings dates for {len(tickers)} tickers...")
+        try:
+            import yfinance as yf
+            for i, ticker in enumerate(tickers):
+                if i % 30 == 0 and i > 0:
+                    logger.info(f"  Earnings dates: {i}/{len(tickers)}")
+                try:
+                    t = yf.Ticker(ticker)
+                    cal = t.earnings_dates
+                    if cal is not None and len(cal) > 0:
+                        dates = [str(d.date()) for d in cal.index[:8]]
+                        earnings[ticker] = dates
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"yfinance earnings dates failed: {e}")
 
     if not earnings:
         if PRODUCTION_MODE:
