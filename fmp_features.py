@@ -23,6 +23,7 @@ import logging
 import time
 import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -138,87 +139,90 @@ def fetch_fmp_fundamental_data(
     if not api_key or api_key in ("", "xxxxx"):
         return {}
 
-    import httpx
-    fundamentals = {}
-    consecutive_errors = 0
-
-    for i, ticker in enumerate(tickers):
-        if i % 20 == 0 and i > 0:
-            logger.info(f"  FMP fundamentals: {i}/{len(tickers)}")
-
+    def _fetch_one_ttm(ticker: str) -> Optional[dict]:
+        """Fetch TTM fundamentals for one ticker (3-4 API calls)."""
         fund = {}
-        try:
-            # 1. TTM Ratios
-            resp = _fmp_get("ratios-ttm", api_key, {"symbol": ticker})
-            if resp.status_code in (403, 402):
-                consecutive_errors += 1
-                if consecutive_errors >= 5:
-                    logger.error(f"FMP returning {resp.status_code} — aborting")
+        # 1. TTM Ratios
+        resp = _fmp_get("ratios-ttm", api_key, {"symbol": ticker})
+        if resp.status_code in (403, 402):
+            return None
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                data = data[0]
+            if isinstance(data, dict):
+                for fmp_field, yf_field in _RATIOS_MAP.items():
+                    val = data.get(fmp_field)
+                    if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
+                        fund[yf_field] = float(val)
+
+        # 2. Key Metrics TTM
+        resp = _fmp_get("key-metrics-ttm", api_key, {"symbol": ticker})
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                data = data[0]
+            if isinstance(data, dict):
+                for fmp_field, yf_field in _KEY_METRICS_MAP.items():
+                    if yf_field not in fund:
+                        val = data.get(fmp_field)
+                        if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
+                            fund[yf_field] = float(val)
+                mc = data.get("marketCap")
+                if mc and "marketCap" not in fund:
+                    fund["marketCap"] = float(mc)
+
+        # 3. Financial Growth
+        resp = _fmp_get("financial-growth", api_key, {"symbol": ticker, "period": "quarter", "limit": 1})
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and data:
+                data = data[0]
+            if isinstance(data, dict):
+                for fmp_field, yf_field in _GROWTH_MAP.items():
+                    val = data.get(fmp_field)
+                    if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
+                        fund[yf_field] = float(val)
+
+        # 4. Profile (beta, market cap fallback)
+        if "beta" not in fund or "marketCap" not in fund:
+            resp = _fmp_get("profile", api_key, {"symbol": ticker})
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    data = data[0]
+                if isinstance(data, dict):
+                    for field in ("beta", "marketCap"):
+                        if field not in fund:
+                            val = data.get(field)
+                            if val is not None and isinstance(val, (int, float)):
+                                fund[field] = float(val)
+
+        return fund if fund else None
+
+    # Fetch all tickers concurrently (15 threads, each does 3-4 API calls)
+    MAX_WORKERS = 15
+    fundamentals = {}
+    errors = 0
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_ticker = {pool.submit(_fetch_one_ttm, t): t for t in tickers}
+        for i, future in enumerate(as_completed(future_to_ticker)):
+            ticker = future_to_ticker[future]
+            if (i + 1) % 50 == 0:
+                logger.info(f"  FMP TTM: {i + 1}/{len(tickers)} "
+                            f"({len(fundamentals)} OK, {errors} errors)")
+            try:
+                data = future.result()
+                if data:
+                    fundamentals[ticker] = data
+            except Exception as e:
+                errors += 1
+                logger.debug(f"FMP TTM failed for {ticker}: {e}")
+                if errors > len(tickers) * 0.2 and errors > 10:
+                    logger.error("FMP TTM: >20% failures, aborting")
+                    pool.shutdown(wait=False, cancel_futures=True)
                     break
-                continue
-            consecutive_errors = 0
-
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    data = data[0]
-                if isinstance(data, dict):
-                    for fmp_field, yf_field in _RATIOS_MAP.items():
-                        val = data.get(fmp_field)
-                        if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
-                            fund[yf_field] = float(val)
-
-            # 2. Key Metrics TTM
-            resp = _fmp_get("key-metrics-ttm", api_key, {"symbol": ticker})
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    data = data[0]
-                if isinstance(data, dict):
-                    for fmp_field, yf_field in _KEY_METRICS_MAP.items():
-                        if yf_field not in fund:
-                            val = data.get(fmp_field)
-                            if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
-                                fund[yf_field] = float(val)
-                    mc = data.get("marketCap")
-                    if mc and "marketCap" not in fund:
-                        fund["marketCap"] = float(mc)
-
-            # 3. Financial Growth
-            resp = _fmp_get("financial-growth", api_key, {"symbol": ticker, "period": "quarter", "limit": 1})
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    data = data[0]
-                if isinstance(data, dict):
-                    for fmp_field, yf_field in _GROWTH_MAP.items():
-                        val = data.get(fmp_field)
-                        if val is not None and isinstance(val, (int, float)) and not np.isnan(val):
-                            fund[yf_field] = float(val)
-
-            # 4. Profile (beta, market cap fallback)
-            if "beta" not in fund or "marketCap" not in fund:
-                resp = _fmp_get("profile", api_key, {"symbol": ticker})
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, list) and data:
-                        data = data[0]
-                    if isinstance(data, dict):
-                        for field in ("beta", "marketCap"):
-                            if field not in fund:
-                                val = data.get(field)
-                                if val is not None and isinstance(val, (int, float)):
-                                    fund[field] = float(val)
-
-            if fund:
-                fundamentals[ticker] = fund
-            time.sleep(0.2)
-
-        except Exception as e:
-            logger.debug(f"FMP fetch failed for {ticker}: {e}")
-            consecutive_errors += 1
-            if consecutive_errors >= 5:
-                break
 
     if fundamentals:
         os.makedirs(cache_dir, exist_ok=True)
@@ -271,100 +275,104 @@ def fetch_fmp_historical_fundamentals(
     if not api_key or api_key in ("", "xxxxx"):
         return {}
 
-    import httpx
+    def _fetch_one_historical(ticker: str) -> Optional[List[dict]]:
+        """Fetch all historical quarterly data for one ticker (4 API calls)."""
+        # 1. Income statement for filingDate
+        resp = _fmp_get("income-statement", api_key, {
+            "symbol": ticker, "period": "quarter", "limit": n_quarters,
+        })
+        if resp.status_code in (403, 402):
+            return None
+
+        filing_dates = {}
+        if resp.status_code == 200:
+            for rec in resp.json() or []:
+                d = rec.get("date")
+                fd = rec.get("filingDate")
+                if d and fd:
+                    filing_dates[d] = fd
+        if not filing_dates:
+            return None
+
+        # 2. Historical ratios
+        resp = _fmp_get("ratios", api_key, {
+            "symbol": ticker, "period": "quarter", "limit": n_quarters,
+        })
+        ratios_by_date = {}
+        if resp.status_code == 200:
+            for rec in resp.json() or []:
+                ratios_by_date[rec.get("date", "")] = rec
+
+        # 3. Historical key-metrics
+        resp = _fmp_get("key-metrics", api_key, {
+            "symbol": ticker, "period": "quarter", "limit": n_quarters,
+        })
+        metrics_by_date = {}
+        if resp.status_code == 200:
+            for rec in resp.json() or []:
+                metrics_by_date[rec.get("date", "")] = rec
+
+        # 4. Financial growth
+        resp = _fmp_get("financial-growth", api_key, {
+            "symbol": ticker, "period": "quarter", "limit": n_quarters,
+        })
+        growth_by_date = {}
+        if resp.status_code == 200:
+            for rec in resp.json() or []:
+                growth_by_date[rec.get("date", "")] = rec
+
+        # Build dated records
+        records = []
+        for date, filing_date in sorted(filing_dates.items()):
+            fund = {"date": date, "filingDate": filing_date}
+
+            r = ratios_by_date.get(date, {})
+            for fmp_field, yf_field in _HIST_RATIOS_MAP.items():
+                val = r.get(fmp_field)
+                if val is not None and isinstance(val, (int, float)):
+                    fund[yf_field] = float(val)
+
+            m = metrics_by_date.get(date, {})
+            for fmp_field, yf_field in _HIST_KEY_METRICS_MAP.items():
+                if yf_field not in fund:
+                    val = m.get(fmp_field)
+                    if val is not None and isinstance(val, (int, float)):
+                        fund[yf_field] = float(val)
+
+            g = growth_by_date.get(date, {})
+            for fmp_field, yf_field in _HIST_GROWTH_MAP.items():
+                val = g.get(fmp_field)
+                if val is not None and isinstance(val, (int, float)):
+                    fund[yf_field] = float(val)
+
+            if len(fund) > 3:
+                records.append(fund)
+
+        return records if records else None
+
+    # Fetch all tickers concurrently (10 threads — each does 4 API calls)
+    MAX_WORKERS = 10
     all_data = {}
-    consecutive_errors = 0
+    errors = 0
 
-    for i, ticker in enumerate(tickers):
-        if i % 20 == 0 and i > 0:
-            logger.info(f"  FMP historical: {i}/{len(tickers)}")
-
-        try:
-            # Get income-statement for filingDate mapping
-            resp = _fmp_get("income-statement", api_key, {
-                "symbol": ticker, "period": "quarter", "limit": n_quarters,
-            })
-            if resp.status_code in (403, 402):
-                consecutive_errors += 1
-                if consecutive_errors >= 5:
-                    logger.error(f"FMP returning {resp.status_code} — aborting historical fetch")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_to_ticker = {pool.submit(_fetch_one_historical, t): t for t in tickers}
+        for i, future in enumerate(as_completed(future_to_ticker)):
+            ticker = future_to_ticker[future]
+            if (i + 1) % 50 == 0:
+                logger.info(f"  FMP historical: {i + 1}/{len(tickers)} "
+                            f"({len(all_data)} OK, {errors} errors)")
+            try:
+                records = future.result()
+                if records:
+                    all_data[ticker] = records
+            except Exception as e:
+                errors += 1
+                logger.debug(f"FMP historical failed for {ticker}: {e}")
+                if errors > len(tickers) * 0.2 and errors > 10:
+                    logger.error("FMP historical: >20% failures, aborting")
+                    pool.shutdown(wait=False, cancel_futures=True)
                     break
-                continue
-            consecutive_errors = 0
-
-            filing_dates = {}  # date -> filingDate
-            if resp.status_code == 200:
-                for rec in resp.json() or []:
-                    d = rec.get("date")
-                    fd = rec.get("filingDate")
-                    if d and fd:
-                        filing_dates[d] = fd
-
-            # Get historical ratios
-            resp = _fmp_get("ratios", api_key, {
-                "symbol": ticker, "period": "quarter", "limit": n_quarters,
-            })
-            ratios_by_date = {}
-            if resp.status_code == 200:
-                for rec in resp.json() or []:
-                    ratios_by_date[rec.get("date", "")] = rec
-
-            # Get historical key-metrics
-            resp = _fmp_get("key-metrics", api_key, {
-                "symbol": ticker, "period": "quarter", "limit": n_quarters,
-            })
-            metrics_by_date = {}
-            if resp.status_code == 200:
-                for rec in resp.json() or []:
-                    metrics_by_date[rec.get("date", "")] = rec
-
-            # Get financial growth
-            resp = _fmp_get("financial-growth", api_key, {
-                "symbol": ticker, "period": "quarter", "limit": n_quarters,
-            })
-            growth_by_date = {}
-            if resp.status_code == 200:
-                for rec in resp.json() or []:
-                    growth_by_date[rec.get("date", "")] = rec
-
-            # Build dated records
-            records = []
-            for date, filing_date in sorted(filing_dates.items()):
-                fund = {"date": date, "filingDate": filing_date}
-
-                r = ratios_by_date.get(date, {})
-                for fmp_field, yf_field in _HIST_RATIOS_MAP.items():
-                    val = r.get(fmp_field)
-                    if val is not None and isinstance(val, (int, float)):
-                        fund[yf_field] = float(val)
-
-                m = metrics_by_date.get(date, {})
-                for fmp_field, yf_field in _HIST_KEY_METRICS_MAP.items():
-                    if yf_field not in fund:
-                        val = m.get(fmp_field)
-                        if val is not None and isinstance(val, (int, float)):
-                            fund[yf_field] = float(val)
-
-                g = growth_by_date.get(date, {})
-                for fmp_field, yf_field in _HIST_GROWTH_MAP.items():
-                    val = g.get(fmp_field)
-                    if val is not None and isinstance(val, (int, float)):
-                        fund[yf_field] = float(val)
-
-                # Only keep if we have meaningful data
-                if len(fund) > 3:  # more than just date + filingDate + 1 field
-                    records.append(fund)
-
-            if records:
-                all_data[ticker] = records
-
-            time.sleep(0.25)
-
-        except Exception as e:
-            logger.debug(f"FMP historical fetch failed for {ticker}: {e}")
-            consecutive_errors += 1
-            if consecutive_errors >= 5:
-                break
 
     if all_data:
         os.makedirs(cache_dir, exist_ok=True)
