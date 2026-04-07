@@ -733,9 +733,14 @@ def build_premium_features(
     prices: pd.DataFrame,
     api_key: str = "",
     cache_dir: str = "data",
+    live_mode: bool = False,
 ) -> Dict[tuple, pd.DataFrame]:
     """
     Build all premium FMP features in one call.
+
+    Args:
+        live_mode: If True, also run Claude sentiment on current news.
+                   False for backtest (can't backtest on today's news).
 
     Returns dict of (category, feature_name) -> DataFrame features,
     same format as other feature builders.
@@ -759,6 +764,7 @@ def build_premium_features(
         return df.rank(axis=1, pct=True)
 
     # --- Analyst Estimates ---
+    logger.info("Fetching analyst estimates...")
     estimates = fetch_analyst_estimates(tickers, api_key, cache_dir)
     if estimates:
         for field in ["eps_revision_pct", "revenue_revision_pct", "estimate_dispersion"]:
@@ -773,6 +779,7 @@ def build_premium_features(
             feats[("analyst", "cs_rank_n_analysts")] = _rank_cs(_broadcast(n_analysts, "n"))
 
     # --- Financial Scores ---
+    logger.info("Fetching financial scores...")
     scores = fetch_financial_scores(tickers, api_key, cache_dir)
     if scores:
         piotroski = {t: d.get("piotroskiScore") for t, d in scores.items()
@@ -790,6 +797,7 @@ def build_premium_features(
             feats[("quality", "cs_rank_altman_z")] = _rank_cs(df)
 
     # --- Price Targets ---
+    logger.info("Fetching price targets...")
     targets = fetch_price_targets(tickers, api_key, cache_dir)
     if targets:
         last_prices = prices.iloc[-1]
@@ -804,8 +812,8 @@ def build_premium_features(
             feats[("analyst", "target_upside")] = df
             feats[("analyst", "cs_rank_target_upside")] = _rank_cs(df)
 
-    # --- Claude Sentiment ---
-    sentiment = fetch_claude_sentiment(tickers, api_key, cache_dir)
+    # --- Claude Sentiment (live only — can't backtest on today's news) ---
+    sentiment = fetch_claude_sentiment(tickers, api_key, cache_dir) if live_mode else {}
     if sentiment:
         llm_sent = {t: d.get("llm_sentiment") for t, d in sentiment.items()
                     if d.get("llm_sentiment") is not None}

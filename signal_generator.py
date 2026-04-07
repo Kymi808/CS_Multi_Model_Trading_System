@@ -211,6 +211,7 @@ class SignalGenerator:
         try:
             premium_feats = build_premium_features(
                 tickers, prices, self.cfg.data.fmp_api_key, self.cfg.data_dir,
+                live_mode=True,
             )
             if premium_feats:
                 logger.info(f"Premium features: {len(premium_feats)} signals")
