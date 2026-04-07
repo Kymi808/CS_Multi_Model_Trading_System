@@ -281,7 +281,25 @@ def walk_forward_train(
                 if len(preds) > 0:
                     all_preds.append(preds)
             else:
-                all_preds.append(model.predict(X_p))
+                preds = model.predict(X_p)
+                all_preds.append(preds)
+
+            # Compute IC for ALL model types (not just LightGBM)
+            # Uses out-of-sample predictions vs actual target
+            if model_type != "lightgbm" and len(preds) > 10:
+                try:
+                    y_p = y.loc[preds.index]
+                    common = preds.index.intersection(y_p.index)
+                    if len(common) > 10:
+                        ic = float(np.corrcoef(preds.loc[common].values, y_p.loc[common].values)[0, 1])
+                        rank_ic = float(pd.Series(preds.loc[common].values).corr(
+                            pd.Series(y_p.loc[common].values), method="spearman"
+                        ))
+                        metrics["val_ic"] = ic
+                        metrics["val_rank_ic"] = rank_ic
+                        logger.info(f"  IC: {ic:.4f}, Rank IC: {rank_ic:.4f}")
+                except Exception:
+                    pass
 
         models.append(model)
 
