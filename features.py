@@ -177,6 +177,7 @@ def build_all_features(
     insider_feats: Optional[Dict] = None,
     fmp_feats: Optional[Dict] = None,
     openbb_feats: Optional[Dict] = None,
+    premium_feats: Optional[Dict] = None,
     sector_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
@@ -245,6 +246,11 @@ def build_all_features(
     if openbb_feats:
         all_feats.update(openbb_feats)
         logger.info(f"  + OpenBB: {len(openbb_feats)} features")
+
+    # Add premium FMP features (analyst estimates, Piotroski, Claude sentiment, etc.)
+    if premium_feats:
+        all_feats.update(premium_feats)
+        logger.info(f"  + Premium: {len(premium_feats)} features")
 
     # Interaction features disabled — Run 1 (3.39 Sharpe) did not use them.
     # Enable after isolating FMP impact. To re-enable, uncomment below:

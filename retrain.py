@@ -165,8 +165,20 @@ def retrain(models_to_train: list[str] = None):
     # Sectors
     sector_map = load_sector_map(tickers, cache_dir=cfg.data_dir)
 
-    # Fundamentals
-    fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
+    # Fundamentals (FMP bulk TTM — 2 API calls for all tickers)
+    fundamentals = None
+    if cfg.data.fmp_api_key:
+        try:
+            from fmp_data_provider import fetch_bulk_fundamentals
+            fundamentals = fetch_bulk_fundamentals(tickers, cfg.data.fmp_api_key, cfg.data_dir)
+            if fundamentals and len(fundamentals) > len(tickers) * 0.3:
+                logger.info(f"  Using FMP bulk fundamentals ({len(fundamentals)} tickers)")
+            else:
+                fundamentals = None
+        except Exception as e:
+            logger.warning(f"  FMP fundamentals failed: {e}")
+    if fundamentals is None:
+        fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
     earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
     fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
 
@@ -207,14 +219,28 @@ def retrain(models_to_train: list[str] = None):
     openbb_feats = {}
     try:
         from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
-        options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir, live_mode=True)
-        short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir, live_mode=True)
+        # live_mode=False: train on the same feature set validated in backtest.
+        # OpenBB features (options IV, short interest) lack reliable historical data,
+        # so they are excluded from training and only used as supplemental signal in
+        # live inference (signal_generator.py uses live_mode=True).
+        options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir, live_mode=False)
+        short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir, live_mode=False)
         openbb_feats = build_openbb_features(options_data, short_data, prices)
         logger.info(f"  OpenBB signals: {len(openbb_feats)}")
     except Exception as e:
         logger.debug(f"OpenBB features skipped: {e}")
 
-    # ── Step 2b: Build features ──────────────────────────────────────
+    # ── Step 2b: Premium features ──────────────────────────────────────
+    premium_feats = {}
+    try:
+        from fmp_data_provider import build_premium_features
+        premium_feats = build_premium_features(tickers, prices, cfg.data.fmp_api_key, cfg.data_dir)
+        if premium_feats:
+            logger.info(f"  Premium features: {len(premium_feats)} signals")
+    except Exception as e:
+        logger.debug(f"Premium features skipped: {e}")
+
+    # ── Step 2c: Build features ──────────────────────────────────────
     logger.info("Step 2: Building features...")
     features, targets = build_all_features(
         prices, volumes, cfg.features,
@@ -223,6 +249,7 @@ def retrain(models_to_train: list[str] = None):
         insider_feats=insider_feats,
         fmp_feats=fmp_feats,
         openbb_feats=openbb_feats,
+        premium_feats=premium_feats,
         sector_map=sector_map,
     )
 
