@@ -452,25 +452,15 @@ def fetch_fmp_fundamentals(
     if not api_key or api_key in ("", "xxxxx"):
         return _generate_synthetic_fmp(tickers)
 
-    import httpx
-    fmp_data = {}
-    consecutive_errors = 0
-
-    for ticker in tickers:
+    def _fetch_one_earnings(ticker: str) -> Optional[list]:
         try:
-            # Use /stable/earnings — has epsActual, epsEstimated, date
             resp = _fmp_get("earnings", api_key, {"symbol": ticker})
             if resp.status_code in (403, 402, 404):
-                consecutive_errors += 1
-                if consecutive_errors >= 5:
-                    logger.warning(f"FMP earnings returning {resp.status_code} — skipping alpha features")
-                    break
-                continue
-            consecutive_errors = 0
+                return None
 
             earnings = (resp.json() or []) if resp.status_code == 200 else []
             if not earnings:
-                continue
+                return None
 
             records = []
             for i, e in enumerate(earnings):
@@ -490,7 +480,6 @@ def fetch_fmp_fundamentals(
                 if estimated != 0:
                     surprise_pct = (actual - estimated) / abs(estimated)
 
-                # Beat streak
                 streak = 0
                 for past in earnings[i:i + 8]:
                     a = past.get("epsActual")
@@ -506,7 +495,6 @@ def fetch_fmp_fundamentals(
                     "earnings_beat_streak": streak,
                 }
 
-                # EPS revision: compare current vs prior estimate
                 if i + 1 < len(earnings):
                     prior_est = earnings[i + 1].get("epsEstimated")
                     if prior_est is not None and estimated != 0 and float(prior_est) != 0:
@@ -514,11 +502,29 @@ def fetch_fmp_fundamentals(
 
                 records.append(record)
 
-            if records:
-                fmp_data[ticker] = records
+            return records if records else None
+        except Exception:
+            return None
 
-        except Exception as e:
-            logger.debug(f"FMP earnings fetch failed for {ticker}: {e}")
+    # Parallel fetch
+    fmp_data = {}
+    errors = 0
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        future_to_ticker = {pool.submit(_fetch_one_earnings, t): t for t in tickers}
+        for i, future in enumerate(as_completed(future_to_ticker)):
+            ticker = future_to_ticker[future]
+            if (i + 1) % 50 == 0:
+                logger.info(f"  FMP earnings: {i + 1}/{len(tickers)} ({len(fmp_data)} OK)")
+            try:
+                records = future.result()
+                if records:
+                    fmp_data[ticker] = records
+            except Exception:
+                errors += 1
+                if errors > len(tickers) * 0.2 and errors > 10:
+                    logger.error("FMP earnings: >20% failures, aborting")
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    break
 
     if fmp_data:
         os.makedirs(cache_dir, exist_ok=True)
