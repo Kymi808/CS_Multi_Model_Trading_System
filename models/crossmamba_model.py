@@ -100,7 +100,6 @@ class SelectiveSSM(nn.Module):
 
         return self.out_proj(y)
 
-    @torch.amp.custom_fwd(device_type="cuda", cast_output=torch.float16)
     def _selective_scan(self, x, A, B, C, delta):
         """
         Run selective scan across the sequence.
@@ -109,18 +108,7 @@ class SelectiveSSM(nn.Module):
         Three implementations in priority order:
         1. Vectorized parallel scan (PyTorch, GPU-optimized, no extra deps)
         2. Sequential fallback (CPU, always works)
-
-        Note: Runs in fp32 internally even under autocast. The exp() and
-        iterative accumulation in the scan lose precision in fp16.
-        Output is cast back to fp16 for the rest of the network.
         """
-        # Force fp32 for numerical stability in recurrence
-        x = x.float()
-        A = A.float()
-        B = B.float()
-        C = C.float()
-        delta = delta.float()
-
         batch, seq_len, d_model = x.shape
         d_state = self.d_state
 
@@ -449,13 +437,8 @@ class CrossMambaRanker:
 
             train_ds = SequenceDataset(train_X, train_y)
             train_dl = DataLoader(
-                train_ds, batch_size=self.cfg.batch_size, shuffle=True,
-                drop_last=False, num_workers=2, pin_memory=(self.device.type == "cuda"),
+                train_ds, batch_size=self.cfg.batch_size, shuffle=True, drop_last=False,
             )
-
-            # Mixed precision for ~2x GPU speedup
-            use_amp = self.device.type == "cuda"
-            scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
             best_val_loss = float("inf")
             patience_counter = 0
@@ -464,23 +447,20 @@ class CrossMambaRanker:
                 model.train()
                 epoch_loss = 0
                 for batch_X, batch_y in train_dl:
-                    batch_X = batch_X.to(self.device, non_blocking=True)
-                    batch_y = batch_y.to(self.device, non_blocking=True)
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.amp.autocast("cuda", enabled=use_amp):
-                        pred = model(batch_X)
-                        loss = criterion(pred, batch_y)
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
+                    batch_X = batch_X.to(self.device)
+                    batch_y = batch_y.to(self.device)
+                    optimizer.zero_grad()
+                    pred = model(batch_X)
+                    loss = criterion(pred, batch_y)
+                    loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
+                    optimizer.step()
                     epoch_loss += loss.item() * len(batch_X)
                 epoch_loss /= len(train_ds)
 
                 if val_X is not None and len(val_X) > 0:
                     model.eval()
-                    with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
+                    with torch.no_grad():
                         val_tensor = torch.FloatTensor(val_X).to(self.device)
                         val_pred = model(val_tensor)
                         val_loss = criterion(
