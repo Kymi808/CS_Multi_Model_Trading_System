@@ -91,7 +91,7 @@ def cmd_compare(args):
         fetch_fundamental_data, fetch_earnings_dates,
     )
     from universe import get_universe, filter_universe_by_liquidity, load_sector_map
-    from fundamental_features import build_fundamental_features
+    from fundamental_features import build_fundamental_features, build_pit_fundamental_features
     from cross_asset_features import build_cross_asset_features
     # Sentiment removed from ML model — used only in agent layer (OpenClaw)
     from features import build_all_features, panel_to_ml_format
@@ -140,34 +140,35 @@ def cmd_compare(args):
     # 2. Sectors
     sector_map = load_sector_map(tickers, cache_dir=cfg.data_dir)
 
-    # 3. Fundamentals (FMP historical quarterly with filing dates for backtest)
-    # For backtest, we fetch all quarterly records with filingDate, then
-    # fundamental_features.py uses the latest filed data at each point in time.
-    # This eliminates look-ahead bias (the #1 issue from senior partner review).
+    # 3. Fundamentals — POINT-IN-TIME (no look-ahead bias)
+    # FMP historical quarterly data with filingDate: each date only sees
+    # fundamentals that were publicly filed before that date.
     fmp_historical = None
-    fundamentals = None
+    fund_feats = {}
     if cfg.data.fmp_api_key:
         try:
             fmp_historical = fetch_fmp_historical_fundamentals(
                 tickers, cfg.data.fmp_api_key, cfg.data_dir,
             )
             if fmp_historical and len(fmp_historical) > len(tickers) * 0.3:
-                # Use latest filed data as of today for the static feature pass
-                # (walk-forward windows will call get_pit_fundamentals per window)
-                fundamentals = get_pit_fundamentals(
-                    fmp_historical, datetime.now().strftime("%Y-%m-%d"),
-                )
-                logger.info(f"Using FMP point-in-time fundamentals ({len(fundamentals)} tickers, "
-                            f"{len(fmp_historical)} with history)")
+                logger.info(f"FMP historical: {len(fmp_historical)} tickers with quarterly data")
             else:
                 fmp_historical = None
         except Exception as e:
-            logger.warning(f"FMP fundamentals failed: {e}")
-    if fundamentals is None:
+            logger.warning(f"FMP historical failed: {e}")
+
+    earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
+
+    if fmp_historical:
+        # Build date-aware fundamentals (forward-filled from filing dates)
+        fund_feats = build_pit_fundamental_features(
+            fmp_historical, prices, earnings_dates, sector_map,
+        )
+    else:
+        # Fallback to yfinance (has look-ahead bias — log warning)
         logger.warning("Using yfinance fundamentals (KNOWN LOOK-AHEAD BIAS)")
         fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
-    earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
-    fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
+        fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
 
     # 5. Cross-asset
     all_ca = cfg.data.cross_asset_tickers + cfg.data.sector_etfs
@@ -179,38 +180,24 @@ def cmd_compare(args):
     sect_etf = ca_prices[[c for c in cfg.data.sector_etfs if c in ca_prices.columns]] if not ca_prices.empty else pd.DataFrame()
     ca_feats = build_cross_asset_features(ca_only, prices, sect_etf, sector_map, cfg.features.cross_asset_windows)
 
-    # 5b. FMP point-in-time fundamentals (earnings revisions, surprise, PE)
+    # 5b. FMP earnings alpha features (point-in-time with publication dates)
     fmp_feats = {}
     try:
         fmp_data = fetch_fmp_fundamentals(tickers, api_key=cfg.data.fmp_api_key, cache_dir=cfg.data_dir)
         fmp_feats = build_fmp_features(fmp_data, prices)
-        logger.info(f"FMP features: {len(fmp_feats)} signals")
+        logger.info(f"FMP alpha features: {len(fmp_feats)} signals")
     except Exception as e:
-        logger.warning(f"FMP features skipped: {e}")
+        logger.warning(f"FMP alpha features skipped: {e}")
 
-    # 5c. OpenBB alternative data (production-only — skipped in backtest to prevent leakage)
-    options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir, live_mode=False)
-    short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir, live_mode=False)
-    openbb_feats = build_openbb_features(options_data, short_data, prices)
-
-    # 5d. Insider features (SEC Form 4)
+    # NOTE: The following are EXCLUDED from backtest to prevent look-ahead bias:
+    # - Premium features (analyst estimates, Piotroski, price targets) = current snapshots
+    # - Insider features = synthetic/current data
+    # - OpenBB features = no historical data
+    # - Sentiment = current news
+    # These are used in live trading via signal_generator.py (where current data is correct).
     insider_feats = {}
-    try:
-        from insider_features import fetch_insider_data, build_insider_features
-        insider_data = fetch_insider_data(tickers, cache_dir=cfg.data_dir)
-        insider_feats = build_insider_features(insider_data, prices, fundamentals)
-    except Exception as e:
-        logger.debug(f"Insider features skipped: {e}")
-
-    # 5e. Premium FMP features (analyst estimates, Piotroski, Claude sentiment)
     premium_feats = {}
-    try:
-        from fmp_data_provider import build_premium_features
-        premium_feats = build_premium_features(tickers, prices, cfg.data.fmp_api_key, cfg.data_dir)
-        if premium_feats:
-            logger.info(f"Premium features: {len(premium_feats)} signals")
-    except Exception as e:
-        logger.debug(f"Premium features skipped: {e}")
+    openbb_feats = {}
 
     # 6. Feature engineering
     features, targets = build_all_features(

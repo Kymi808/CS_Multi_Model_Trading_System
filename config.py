@@ -87,8 +87,8 @@ class ModelConfig:
     embargo_days: int = 5
 
     # Ensemble
-    n_ensemble: int = 3
-    ensemble_seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
+    n_ensemble: int = 5
+    ensemble_seeds: List[int] = field(default_factory=lambda: [42, 123, 456, 789, 1024])
 
 
 @dataclass

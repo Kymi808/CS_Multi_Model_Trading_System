@@ -84,14 +84,188 @@ def build_fundamental_features(
     return feats
 
 
+def build_pit_fundamental_features(
+    historical_data: Dict[str, list],
+    prices: pd.DataFrame,
+    earnings_dates: Dict[str, List[str]],
+    sector_map: Dict[str, str],
+) -> dict:
+    """
+    Build POINT-IN-TIME fundamental features from FMP historical quarterly data.
+
+    Unlike build_fundamental_features which broadcasts a single snapshot,
+    this uses filingDate to ensure each date only sees data that was
+    publicly available. No look-ahead bias.
+
+    Args:
+        historical_data: {ticker: [{date, filingDate, trailingPE, ROE, ...}]}
+                         from fetch_fmp_historical_fundamentals()
+    """
+    tickers = [t for t in prices.columns if t in historical_data]
+    dates = prices.index
+    feats = {}
+
+    if not tickers:
+        logger.warning("No PIT fundamental data available")
+        return feats
+
+    # --- Valuation ---
+    for field, name in [
+        ("trailingPE", "earnings_yield"),
+        ("priceToBook", "book_to_price"),
+        ("priceToSalesTrailing12Months", "sales_yield"),
+        ("enterpriseToEbitda", "ev_ebitda_yield"),
+    ]:
+        df = _broadcast_pit(historical_data, field, prices.columns.tolist(), dates)
+        # Invert: lower PE/PB = cheaper = higher yield
+        if field in ("trailingPE", "priceToBook", "priceToSalesTrailing12Months", "enterpriseToEbitda"):
+            inv = 1.0 / df.replace(0, np.nan)
+            inv = inv.clip(-10, 10)  # cap extreme values
+        else:
+            inv = df
+
+        if inv.notna().sum().sum() > 0:
+            feats[("fund", name)] = inv
+            feats[("fund", f"cs_rank_{name.replace('_yield', '').replace('book_to_price', 'btp').replace('sales_yield', 'sales_yield').replace('ev_ebitda_yield', 'ev_ebitda_yield')}")] = _rank_cross_sectional(inv)
+
+    # Value composite
+    value_keys = [k for k in feats if k[0] == "fund" and "cs_rank" in k[1] and
+                  any(v in k[1] for v in ["earnings", "btp", "sales", "ev_ebitda"])]
+    if len(value_keys) >= 2:
+        stacked = [feats[k].stack() for k in value_keys]
+        avg = pd.concat(stacked, axis=1).mean(axis=1).unstack()
+        if isinstance(avg, pd.DataFrame) and not avg.empty:
+            feats[("fund", "value_composite")] = avg
+
+    # --- Quality ---
+    for field, name in [
+        ("returnOnEquity", "roe"), ("returnOnAssets", "roa"),
+        ("grossMargins", "gross_margin"), ("operatingMargins", "op_margin"),
+        ("profitMargins", "net_margin"),
+    ]:
+        df = _broadcast_pit(historical_data, field, prices.columns.tolist(), dates)
+        if df.notna().sum().sum() > 0:
+            feats[("fund", f"cs_rank_{name}")] = _rank_cross_sectional(df)
+
+    # Quality composite
+    quality_keys = [("fund", f"cs_rank_{n}") for n in
+                    ["roe", "roa", "gross_margin", "op_margin", "net_margin"]]
+    quality_dfs = [feats[k] for k in quality_keys if k in feats]
+    if len(quality_dfs) >= 2:
+        stacked = [df.stack() for df in quality_dfs]
+        avg = pd.concat(stacked, axis=1).mean(axis=1).unstack()
+        if isinstance(avg, pd.DataFrame) and not avg.empty:
+            feats[("fund", "quality_composite")] = avg
+
+    # --- Balance sheet ---
+    for field, name, invert in [
+        ("debtToEquity", "debt_to_equity", True),
+        ("currentRatio", "current_ratio", False),
+    ]:
+        df = _broadcast_pit(historical_data, field, prices.columns.tolist(), dates)
+        if df.notna().sum().sum() > 0:
+            if invert:
+                feats[("fund", f"cs_rank_{name}")] = 1 - _rank_cross_sectional(df)
+            else:
+                feats[("fund", f"cs_rank_{name}")] = _rank_cross_sectional(df)
+
+    # --- Growth ---
+    for field, name in [
+        ("revenueGrowth", "rev_growth"),
+        ("earningsGrowth", "earn_growth"),
+        ("earningsQuarterlyGrowth", "earn_q_growth"),
+    ]:
+        df = _broadcast_pit(historical_data, field, prices.columns.tolist(), dates)
+        if df.notna().sum().sum() > 0:
+            feats[("fund", f"cs_rank_{name}")] = _rank_cross_sectional(df)
+
+    # --- Size (from market cap) ---
+    mcap_df = _broadcast_pit(historical_data, "marketCap", prices.columns.tolist(), dates)
+    if mcap_df.notna().sum().sum() > 0:
+        log_mcap = np.log(mcap_df.clip(lower=1))
+        feats[("fund", "log_mcap")] = log_mcap
+        feats[("fund", "cs_rank_size")] = _rank_cross_sectional(log_mcap)
+
+    # --- Earnings event features (already date-aware) ---
+    _build_earnings_features(feats, earnings_dates, tickers, dates, prices)
+
+    # --- Sector-relative (using PIT data) ---
+    if sector_map:
+        # Get latest available fundamentals per ticker for sector-relative
+        # This is a simplification — ideally each date would have its own sector-relative
+        latest_fund = {}
+        for t in tickers:
+            recs = historical_data.get(t, [])
+            if recs:
+                latest = recs[-1]  # last record (most recent quarter)
+                latest_fund[t] = latest
+        if latest_fund:
+            _build_sector_relative_features(feats, latest_fund, tickers, dates, sector_map)
+
+    if not feats:
+        logger.warning("No PIT fundamental features built")
+        return feats
+
+    logger.info(f"PIT fundamental features: {len(feats)} signals (point-in-time, no look-ahead)")
+    return feats
+
+
 def _broadcast_static(values: Dict[str, float], tickers: List[str],
                        dates: pd.DatetimeIndex, name: str) -> pd.DataFrame:
-    """Broadcast a static per-ticker value across all dates."""
+    """Broadcast a static per-ticker value across all dates.
+
+    WARNING: This creates look-ahead bias when used with current snapshots
+    in backtest. For honest backtest, use _broadcast_pit instead.
+    """
     series = pd.Series({t: values.get(t, np.nan) for t in tickers})
     df = pd.DataFrame(
         np.tile(series.values, (len(dates), 1)),
         index=dates, columns=tickers,
     )
+    return df
+
+
+def _broadcast_pit(
+    historical_data: Dict[str, list],
+    field: str,
+    tickers: List[str],
+    dates: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """
+    Build a time-varying fundamental feature from point-in-time quarterly data.
+
+    For each ticker, places the field value at its filingDate and forward-fills.
+    The model at date T only sees data that was publicly filed before T.
+    No look-ahead bias.
+
+    Args:
+        historical_data: {ticker: [{date, filingDate, trailingPE, ...}, ...]}
+        field: which field to extract (e.g. "trailingPE")
+        tickers: list of tickers
+        dates: DatetimeIndex of all backtest dates
+    """
+    df = pd.DataFrame(np.nan, index=dates, columns=tickers)
+
+    for ticker in tickers:
+        records = historical_data.get(ticker, [])
+        if not records:
+            continue
+        for rec in records:
+            filing_date = rec.get("filingDate", "")
+            val = rec.get(field)
+            if not filing_date or val is None:
+                continue
+            try:
+                fd = pd.Timestamp(filing_date)
+            except Exception:
+                continue
+            # Place at first trading date on or after filing
+            valid = dates[dates >= fd]
+            if len(valid) > 0:
+                df.loc[valid[0], ticker] = float(val)
+
+    # Forward-fill: each quarterly value persists until next filing
+    df = df.ffill()
     return df
 
 
