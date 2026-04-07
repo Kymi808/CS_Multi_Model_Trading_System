@@ -24,7 +24,8 @@ from data_loader import (
 from universe import get_universe, filter_universe_by_liquidity, load_sector_map
 from fundamental_features import build_fundamental_features
 from cross_asset_features import build_cross_asset_features
-from sentiment_features import fetch_news_sentiment, build_sentiment_features
+# Sentiment removed from ML model — used only in agent orchestration layer (OpenClaw)
+# where Claude Haiku scores live news at inference time.
 from features import build_all_features, panel_to_ml_format
 from fmp_features import (
     fetch_fmp_fundamental_data, fetch_fmp_historical_fundamentals,
@@ -156,11 +157,6 @@ class SignalGenerator:
             fundamentals, prices, earnings_dates, self.sector_map,
         )
 
-        # 4. Sentiment
-        logger.info("Fetching sentiment...")
-        sentiment_data = fetch_news_sentiment(tickers, cache_dir=self.cfg.data_dir)
-        sent_feats = build_sentiment_features(sentiment_data, prices)
-
         # 5. Cross-asset
         logger.info("Fetching cross-asset data...")
         all_ca = self.cfg.data.cross_asset_tickers + self.cfg.data.sector_etfs
@@ -223,7 +219,7 @@ class SignalGenerator:
         features, targets = build_all_features(
             prices, volumes, self.cfg.features,
             fundamental_feats=fund_feats,
-            cross_asset_feats={**sent_feats, **ca_feats},
+            cross_asset_feats=ca_feats,
             insider_feats=insider_feats,
             fmp_feats=fmp_feats,
             openbb_feats=openbb_feats,

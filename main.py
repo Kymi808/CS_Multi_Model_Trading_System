@@ -93,7 +93,7 @@ def cmd_compare(args):
     from universe import get_universe, filter_universe_by_liquidity, load_sector_map
     from fundamental_features import build_fundamental_features
     from cross_asset_features import build_cross_asset_features
-    from sentiment_features import fetch_news_sentiment, build_sentiment_features
+    # Sentiment removed from ML model — used only in agent layer (OpenClaw)
     from features import build_all_features, panel_to_ml_format
     from fmp_features import (
         fetch_fmp_fundamental_data, fetch_fmp_historical_fundamentals,
@@ -169,10 +169,6 @@ def cmd_compare(args):
     earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
     fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
 
-    # 4. Sentiment
-    sentiment_data = fetch_news_sentiment(tickers, cache_dir=cfg.data_dir)
-    sent_feats = build_sentiment_features(sentiment_data, prices)
-
     # 5. Cross-asset
     all_ca = cfg.data.cross_asset_tickers + cfg.data.sector_etfs
     ca_prices = fetch_cross_asset_data(
@@ -220,7 +216,7 @@ def cmd_compare(args):
     features, targets = build_all_features(
         prices, volumes, cfg.features,
         fundamental_feats=fund_feats,
-        cross_asset_feats={**sent_feats, **ca_feats},
+        cross_asset_feats=ca_feats,
         insider_feats=insider_feats,
         fmp_feats=fmp_feats,
         openbb_feats=openbb_feats,

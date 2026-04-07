@@ -67,63 +67,12 @@ def _patch_for_alpaca():
         from alpaca_adapter import (
             fetch_price_data as alpaca_prices,
             fetch_cross_asset_data as alpaca_cross_asset,
-            fetch_news_sentiment as alpaca_sentiment,
         )
 
         import data_loader
-        import sentiment_features
 
         data_loader.fetch_price_data = alpaca_prices
         data_loader.fetch_cross_asset_data = alpaca_cross_asset
-        sentiment_features.fetch_news_sentiment = alpaca_sentiment
-
-        # Enhance sentiment with LLM analysis if Anthropic key available
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if anthropic_key and not anthropic_key.startswith("sk-ant-xxx"):
-            try:
-                from alpaca_adapter.news import (
-                    analyze_articles_batch, compute_llm_sentiment_features,
-                )
-                from alpaca_adapter.provider import AlpacaDataProvider
-
-                _base_sentiment = sentiment_features.fetch_news_sentiment
-
-                def _enhanced_sentiment(tickers, max_per_ticker=10, cache_dir="data"):
-                    base = _base_sentiment(tickers, max_per_ticker, cache_dir)
-                    # Ensure every ticker has base keys
-                    for t in tickers:
-                        if t not in base:
-                            base[t] = {
-                                "avg_sentiment": 0.0, "max_sentiment": 0.0,
-                                "min_sentiment": 0.0, "sentiment_std": 0.0,
-                                "n_articles": 0, "positive_ratio": 0.0, "negative_ratio": 0.0,
-                            }
-                    try:
-                        import asyncio
-
-                        async def _llm():
-                            provider = AlpacaDataProvider()
-                            articles = await provider.get_news(symbols=tickers[:30], limit=30)
-                            await provider.close()
-                            dicts = [{"headline": a.headline, "summary": a.summary,
-                                      "symbols": a.symbols, "source": a.source,
-                                      "created_at": a.created_at.isoformat()} for a in articles]
-                            return await analyze_articles_batch(dicts)
-
-                        analyses = asyncio.run(_llm())
-                        if analyses:
-                            for t in tickers:
-                                feats = compute_llm_sentiment_features(analyses, t)
-                                base[t].update(feats)
-                            logger.info(f"LLM sentiment added for {len(tickers)} tickers")
-                    except Exception as e:
-                        logger.debug(f"LLM sentiment skipped: {e}")
-                    return base
-
-                sentiment_features.fetch_news_sentiment = _enhanced_sentiment
-                logger.info("Sentiment enhanced with LLM (Claude Haiku)")
-            except Exception as e:
-                logger.debug(f"LLM sentiment not available: {e}")
 
         logger.info("Data fetchers patched to use Alpaca")
     except Exception as e:
@@ -139,7 +88,7 @@ def retrain(models_to_train: list[str] = None):
     from universe import get_universe, filter_universe_by_liquidity, load_sector_map
     from fundamental_features import build_fundamental_features
     from cross_asset_features import build_cross_asset_features
-    from sentiment_features import fetch_news_sentiment, build_sentiment_features
+    # Sentiment removed from ML model — used only in agent layer (OpenClaw)
     from features import build_all_features, panel_to_ml_format
     from model import EnsembleRanker, create_model
 
@@ -181,10 +130,6 @@ def retrain(models_to_train: list[str] = None):
         fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
     earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
     fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
-
-    # Sentiment
-    sentiment_data = fetch_news_sentiment(tickers, cache_dir=cfg.data_dir)
-    sent_feats = build_sentiment_features(sentiment_data, prices)
 
     # Cross-asset
     all_ca = cfg.data.cross_asset_tickers + cfg.data.sector_etfs
@@ -245,7 +190,7 @@ def retrain(models_to_train: list[str] = None):
     features, targets = build_all_features(
         prices, volumes, cfg.features,
         fundamental_feats=fund_feats,
-        cross_asset_feats={**sent_feats, **ca_feats},
+        cross_asset_feats=ca_feats,
         insider_feats=insider_feats,
         fmp_feats=fmp_feats,
         openbb_feats=openbb_feats,
