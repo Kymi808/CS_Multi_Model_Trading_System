@@ -244,7 +244,7 @@ def retrain(models_to_train: list[str] = None):
     # ── Step 3: Feature selection ────────────────────────────────────
     logger.info("Step 3: Feature selection...")
     from backtest import select_features_by_ic
-    max_feats = getattr(cfg.features, "max_features", 65)
+    max_feats = getattr(cfg.features, "max_features", 50)
     selected = select_features_by_ic(X, y, max_features=max_feats, min_abs_ic=0.005, n_splits=3)
     X = X[selected]
     logger.info(f"  Selected {len(selected)} features")

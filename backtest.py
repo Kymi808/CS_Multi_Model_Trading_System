@@ -264,7 +264,7 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
     h = cfg.features.primary_target_horizon
 
     # Select target based on config (risk-adjusted is default)
-    target_type = getattr(cfg.features, "target_type", "raw_rank")
+    target_type = getattr(cfg.features, "target_type", "risk_adjusted")
     if target_type == "risk_adjusted":
         target_key = f"fwd_risk_adj_{h}d"
     elif target_type == "industry_relative" and sector_map:
@@ -281,7 +281,7 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
     # 7. FEATURE SELECTION — stability-based (expanded cap for new features)
     # ==================================================================
     _log_step(7, "Feature selection (stability-based)")
-    max_feats = getattr(cfg.features, "max_features", 65)
+    max_feats = getattr(cfg.features, "max_features", 50)
     selected_features = select_features_by_ic(
         X, y, max_features=max_feats, min_abs_ic=0.005, n_splits=3,
     )

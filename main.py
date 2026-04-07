@@ -165,22 +165,42 @@ def cmd_compare(args):
     short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir, live_mode=False)
     openbb_feats = build_openbb_features(options_data, short_data, prices)
 
+    # 5d. Insider features (SEC Form 4)
+    insider_feats = {}
+    try:
+        from insider_features import fetch_insider_data, build_insider_features
+        insider_data = fetch_insider_data(tickers, cache_dir=cfg.data_dir)
+        insider_feats = build_insider_features(insider_data, prices, fundamentals)
+    except Exception as e:
+        logger.debug(f"Insider features skipped: {e}")
+
     # 6. Feature engineering
     features, targets = build_all_features(
         prices, volumes, cfg.features,
         fundamental_feats=fund_feats,
         cross_asset_feats={**sent_feats, **ca_feats},
+        insider_feats=insider_feats,
         fmp_feats=fmp_feats,
         openbb_feats=openbb_feats,
         sector_map=sector_map,
     )
     h = cfg.features.primary_target_horizon
-    target_key = f"fwd_rank_{h}d"
+
+    # Select target based on config (matches backtest.py and retrain.py)
+    target_type = getattr(cfg.features, "target_type", "risk_adjusted")
+    if target_type == "risk_adjusted":
+        target_key = f"fwd_risk_adj_{h}d"
+    elif target_type == "industry_relative" and sector_map:
+        target_key = f"fwd_ind_rel_{h}d"
+    else:
+        target_key = f"fwd_rank_{h}d"
+
     target = targets.get(target_key, targets.get(f"fwd_ret_{h}d"))
     X, y = panel_to_ml_format(features, target)
 
     # 7. Feature selection
-    selected_features = select_features_by_ic(X, y, max_features=50)
+    max_feats = getattr(cfg.features, "max_features", 50)
+    selected_features = select_features_by_ic(X, y, max_features=max_feats)
     X = X[selected_features]
 
     # ============================================================

@@ -163,12 +163,22 @@ class SignalGenerator:
         except Exception as e:
             logger.debug(f"OpenBB features skipped: {e}")
 
+        # 5d. Insider features (SEC Form 4)
+        insider_feats = {}
+        try:
+            from insider_features import fetch_insider_data, build_insider_features
+            insider_data = fetch_insider_data(tickers, cache_dir=self.cfg.data_dir)
+            insider_feats = build_insider_features(insider_data, prices, self.fundamentals)
+        except Exception as e:
+            logger.debug(f"Insider features skipped: {e}")
+
         # 6. Build features
         logger.info("Building features...")
         features, targets = build_all_features(
             prices, volumes, self.cfg.features,
             fundamental_feats=fund_feats,
             cross_asset_feats={**sent_feats, **ca_feats},
+            insider_feats=insider_feats,
             fmp_feats=fmp_feats,
             openbb_feats=openbb_feats,
             sector_map=self.sector_map,
