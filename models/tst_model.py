@@ -192,9 +192,13 @@ class TSTRanker:
                 dropout=self.cfg.dropout,
             ).to(self.device)
 
-            # torch.compile disabled: with only 3 epochs per walk-forward window,
-            # the JIT compilation overhead (~10s) exceeds the training speedup.
-            # CUDAGraph also creates excessive graph variants from varying batch sizes.
+            # JIT compile for GPU acceleration (PyTorch 2.x)
+            if self.device.type == "cuda":
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                    logger.info(f"  TST compiled with torch.compile")
+                except Exception:
+                    pass
 
             optimizer = torch.optim.AdamW(
                 model.parameters(),
