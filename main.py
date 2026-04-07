@@ -431,6 +431,100 @@ def generate_plots_named(results: "pd.DataFrame", summary: dict, name: str, resu
     plt.close()
 
 
+def cmd_stress(args):
+    """Run stress test scenarios on a sample portfolio."""
+    logger.info("Running stress tests...")
+    from stress_test import run_stress_tests, format_stress_report
+    from config import Config
+
+    cfg = Config()
+
+    # Load latest prices for beta estimation
+    from data_loader import fetch_price_data
+    from universe import get_universe, filter_universe_by_liquidity
+
+    tickers = get_universe(cfg.data)
+    prices, volumes = fetch_price_data(tickers, cfg.data, cache_dir=cfg.data_dir)
+    tickers = filter_universe_by_liquidity(tickers, cfg.data, prices, volumes)
+    prices = prices[[t for t in tickers if t in prices.columns]]
+
+    # Create a sample portfolio (10L/10S, equal weight)
+    n_long = cfg.portfolio.max_positions_long
+    n_short = cfg.portfolio.max_positions_short
+    long_tickers = list(prices.columns[:n_long])
+    short_tickers = list(prices.columns[n_long:n_long + n_short])
+
+    weights = pd.Series(dtype=float)
+    for t in long_tickers:
+        weights[t] = 1.0 / n_long * 0.8
+    for t in short_tickers:
+        weights[t] = -1.0 / n_short * 0.8
+
+    # Run stress tests
+    results = run_stress_tests(
+        weights=weights,
+        prices=prices,
+        account_equity=cfg.portfolio.initial_capital,
+        risk_config={
+            "target_annual_vol": cfg.risk.target_annual_vol,
+            "vol_scale_floor": cfg.risk.vol_scale_floor,
+        },
+    )
+
+    # Print report
+    report = format_stress_report(results)
+    print(report)
+
+    # Save
+    os.makedirs(cfg.results_dir, exist_ok=True)
+    with open(os.path.join(cfg.results_dir, "stress_test_report.txt"), "w") as f:
+        f.write(report)
+    logger.info(f"Stress report saved to {cfg.results_dir}/stress_test_report.txt")
+
+
+def cmd_bear_2022(args):
+    """Run backtest focused on 2022 bear market."""
+    logger.info("Running 2022 bear market analysis...")
+    from config import Config
+    from backtest import run_backtest
+
+    cfg = Config()
+    _apply_portfolio_args(cfg, args)
+
+    # Override date range: need 2020-2022 (2 years training + 1 year test)
+    cfg.data.lookback_years = 3
+
+    results, summary = run_backtest(cfg, optimize=False)
+
+    if results is not None and not results.empty:
+        # Run bear market analysis on 2022 portion
+        from bear_market_analysis import analyze_bear_period, format_bear_report
+        from data_loader import fetch_price_data, fetch_cross_asset_data
+        from universe import get_universe
+
+        tickers = get_universe(cfg.data)
+        prices, _ = fetch_price_data(tickers, cfg.data, cache_dir=cfg.data_dir)
+
+        # Get SPY/benchmark data
+        ca_prices = fetch_cross_asset_data(
+            ["^GSPC", "SPY"], prices.index[0].strftime("%Y-%m-%d"),
+            prices.index[-1].strftime("%Y-%m-%d"), cache_dir=cfg.data_dir,
+        )
+        full_prices = pd.concat([prices, ca_prices], axis=1)
+
+        analysis = analyze_bear_period(results, full_prices)
+        report = format_bear_report(analysis)
+        print(report)
+
+        # Save
+        os.makedirs(cfg.results_dir, exist_ok=True)
+        with open(os.path.join(cfg.results_dir, "bear_2022_report.txt"), "w") as f:
+            f.write(report)
+        logger.info(f"Bear market report saved to {cfg.results_dir}/bear_2022_report.txt")
+    else:
+        logger.error("Backtest produced no results")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Quant-Grade Cross-Sectional Equity Ranking System\n"
@@ -475,6 +569,15 @@ def main():
     trade.add_argument("--n-long", type=int)
     trade.add_argument("--n-short", type=int)
 
+    # --- stress ---
+    stress = sub.add_parser("stress", help="Run stress test scenarios")
+
+    # --- bear-2022 ---
+    bear = sub.add_parser("bear-2022", help="Run 2022 bear market backtest")
+    bear.add_argument("--long-biased", action="store_true")
+    bear.add_argument("--n-long", type=int)
+    bear.add_argument("--n-short", type=int)
+
     args = parser.parse_args()
 
     if args.command == "backtest":
@@ -485,12 +588,17 @@ def main():
         cmd_signal(args)
     elif args.command == "trade":
         cmd_trade(args)
+    elif args.command == "stress":
+        cmd_stress(args)
+    elif args.command == "bear-2022":
+        cmd_bear_2022(args)
     else:
         parser.print_help()
         print("\nQuick start:")
         print("  python main.py backtest              # LightGBM backtest")
         print("  python main.py compare               # Compare all 3 models + ensemble")
-        print("  python main.py compare --models lightgbm,tst  # Compare specific models")
+        print("  python main.py stress                # Run stress test scenarios")
+        print("  python main.py bear-2022             # 2022 bear market backtest")
 
 
 if __name__ == "__main__":
