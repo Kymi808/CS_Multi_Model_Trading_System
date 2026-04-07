@@ -12,6 +12,10 @@ from typing import List, Tuple, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# In production, refuse to trade on synthetic data.
+# Set TRADING_ENV=paper or TRADING_ENV=live to enable this guard.
+PRODUCTION_MODE = os.environ.get("TRADING_ENV", "").lower() in ("production", "live", "paper")
+
 
 def _is_cache_valid(path: str, min_rows: int = 10) -> bool:
     """Check if a CSV cache file exists and has meaningful data."""
@@ -282,6 +286,11 @@ def fetch_price_data(
             return prices, volumes
 
     # Fallback: generate synthetic data
+    if PRODUCTION_MODE:
+        raise RuntimeError(
+            "Price data fetch failed and TRADING_ENV is set to production/paper/live. "
+            "Refusing to use synthetic data. Check network connectivity and API keys."
+        )
     logger.warning("Network unavailable — generating synthetic price data for offline comparison")
     prices, volumes = _generate_synthetic_prices(tickers, start_date, end_date)
     prices.to_csv(cache_px)
@@ -315,6 +324,11 @@ def fetch_cross_asset_data(
         logger.warning(f"Cross-asset download failed: {e}")
 
     # Fallback: synthetic
+    if PRODUCTION_MODE:
+        raise RuntimeError(
+            "Cross-asset data fetch failed and TRADING_ENV is set to production/paper/live. "
+            "Refusing to use synthetic data. Check network connectivity and API keys."
+        )
     logger.warning("Network unavailable — generating synthetic cross-asset data")
     ca = _generate_synthetic_cross_asset(tickers, start_date, end_date)
     os.makedirs(cache_dir, exist_ok=True)
@@ -383,6 +397,11 @@ def fetch_fundamental_data(
         logger.warning(f"yfinance fundamentals failed: {e}")
 
     if not fundamentals:
+        if PRODUCTION_MODE:
+            raise RuntimeError(
+                "Fundamental data fetch failed and TRADING_ENV is set to production/paper/live. "
+                "Refusing to use synthetic data. Check network connectivity and API keys."
+            )
         logger.warning("Network unavailable — generating synthetic fundamentals")
         fundamentals = _generate_synthetic_fundamentals(tickers)
 
@@ -421,6 +440,11 @@ def fetch_earnings_dates(
         logger.warning(f"yfinance earnings dates failed: {e}")
 
     if not earnings:
+        if PRODUCTION_MODE:
+            raise RuntimeError(
+                "Earnings dates fetch failed and TRADING_ENV is set to production/paper/live. "
+                "Refusing to use synthetic data. Check network connectivity and API keys."
+            )
         logger.warning("Network unavailable — generating synthetic earnings dates")
         earnings = _generate_synthetic_earnings(tickers)
 

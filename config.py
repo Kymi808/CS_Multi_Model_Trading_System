@@ -188,6 +188,13 @@ class ExecutionConfig:
     def __post_init__(self):
         self.api_key = os.environ.get("ALPACA_API_KEY", self.api_key)
         self.api_secret = os.environ.get("ALPACA_API_SECRET", self.api_secret)
+        if not self.api_key or not self.api_secret:
+            import warnings
+            warnings.warn(
+                "ALPACA_API_KEY/SECRET not set — trading commands will fail. "
+                "Get free keys at https://alpaca.markets",
+                stacklevel=2,
+            )
 
 
 @dataclass
@@ -205,3 +212,21 @@ class Config:
     model_dir: str = "models"
     log_dir: str = "logs"
     results_dir: str = "results"
+
+    def __post_init__(self):
+        # Validate critical trading parameters
+        p = self.portfolio
+        assert 0 < p.max_position_pct <= 0.25, \
+            f"max_position_pct={p.max_position_pct} must be in (0, 0.25]"
+        assert 0 < p.max_gross_leverage <= 3.0, \
+            f"max_gross_leverage={p.max_gross_leverage} must be in (0, 3.0]"
+        assert p.max_positions_long >= 1, \
+            f"max_positions_long={p.max_positions_long} must be >= 1"
+        assert 0 < self.risk.target_annual_vol <= 0.50, \
+            f"target_annual_vol={self.risk.target_annual_vol} must be in (0, 0.50]"
+        # Resolve relative paths to absolute (relative to this file's directory)
+        base = os.path.dirname(os.path.abspath(__file__))
+        for attr in ("data_dir", "model_dir", "log_dir", "results_dir"):
+            path = getattr(self, attr)
+            if not os.path.isabs(path):
+                setattr(self, attr, os.path.join(base, path))
