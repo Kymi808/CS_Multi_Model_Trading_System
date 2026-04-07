@@ -164,6 +164,10 @@ def cmd_compare(args):
         fund_feats = build_pit_fundamental_features(
             fmp_historical, prices, earnings_dates, sector_map,
         )
+        # Extract latest snapshot for risk model (uses current state, not historical)
+        fundamentals = get_pit_fundamentals(
+            fmp_historical, datetime.now().strftime("%Y-%m-%d"),
+        )
     else:
         # Fallback to yfinance (has look-ahead bias — log warning)
         logger.warning("Using yfinance fundamentals (KNOWN LOOK-AHEAD BIAS)")
