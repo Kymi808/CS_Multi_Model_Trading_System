@@ -209,8 +209,13 @@ class TSTRanker:
 
             train_ds = SequenceDataset(train_X, train_y)
             train_dl = DataLoader(
-                train_ds, batch_size=self.cfg.batch_size, shuffle=True, drop_last=False
+                train_ds, batch_size=self.cfg.batch_size, shuffle=True,
+                drop_last=False, num_workers=2, pin_memory=(self.device.type == "cuda"),
             )
+
+            # Mixed precision for ~2x GPU speedup
+            use_amp = self.device.type == "cuda"
+            scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
             best_val_loss = float("inf")
             patience_counter = 0
@@ -219,21 +224,24 @@ class TSTRanker:
                 model.train()
                 epoch_loss = 0
                 for batch_X, batch_y in train_dl:
-                    batch_X = batch_X.to(self.device)
-                    batch_y = batch_y.to(self.device)
-                    optimizer.zero_grad()
-                    pred = model(batch_X)
-                    loss = criterion(pred, batch_y)
-                    loss.backward()
+                    batch_X = batch_X.to(self.device, non_blocking=True)
+                    batch_y = batch_y.to(self.device, non_blocking=True)
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        pred = model(batch_X)
+                        loss = criterion(pred, batch_y)
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
                     epoch_loss += loss.item() * len(batch_X)
                 epoch_loss /= len(train_ds)
 
                 # Validation
                 if val_X is not None and len(val_X) > 0:
                     model.eval()
-                    with torch.no_grad():
+                    with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
                         val_tensor = torch.FloatTensor(val_X).to(self.device)
                         val_pred = model(val_tensor)
                         val_loss = criterion(
