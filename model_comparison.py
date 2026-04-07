@@ -155,6 +155,57 @@ def run_single_model_pipeline(
             metrics_df["val_rank_ic"].mean() / (ic_std + 1e-8)
         )
 
+    # Add portfolio exposure, turnover, and position metrics
+    if "gross_exposure" in results_df.columns:
+        summary["avg_gross_exposure"] = float(results_df["gross_exposure"].mean())
+        summary["max_gross_exposure"] = float(results_df["gross_exposure"].max())
+        summary["avg_net_exposure"] = float(results_df["net_exposure"].mean())
+        summary["min_net_exposure"] = float(results_df["net_exposure"].min())
+        summary["max_net_exposure"] = float(results_df["net_exposure"].max())
+    if "turnover" in results_df.columns:
+        summary["avg_turnover"] = float(results_df["turnover"].mean())
+    if "n_long" in results_df.columns:
+        summary["avg_n_long"] = float(results_df["n_long"].mean())
+        summary["avg_n_short"] = float(results_df["n_short"].mean())
+    if "tc_cost" in results_df.columns:
+        summary["total_tc_cost"] = float(results_df["tc_cost"].sum())
+        summary["avg_daily_tc_bps"] = float(results_df["tc_cost"].mean() * 10000)
+
+    # Long vs short attribution
+    if "gross_return" in results_df.columns and "net_exposure" in results_df.columns:
+        net_rets = results_df["net_return"]
+        gross_exp = results_df["gross_exposure"]
+        net_exp = results_df["net_exposure"]
+        # Approximate: long_weight ≈ (gross + net) / 2, short_weight ≈ (gross - net) / 2
+        avg_long_wt = float(((gross_exp + net_exp) / 2).mean())
+        avg_short_wt = float(((gross_exp - net_exp) / 2).mean())
+        summary["avg_long_weight"] = avg_long_wt
+        summary["avg_short_weight"] = avg_short_wt
+
+    # Drawdown duration
+    cum = (1 + results_df["net_return"]).cumprod()
+    dd = cum / cum.cummax() - 1
+    in_dd = dd < 0
+    if in_dd.any():
+        dd_groups = (~in_dd).cumsum()
+        dd_durations = in_dd.groupby(dd_groups).sum()
+        dd_durations = dd_durations[dd_durations > 0]
+        if len(dd_durations) > 0:
+            summary["max_dd_duration_days"] = int(dd_durations.max())
+            summary["avg_dd_duration_days"] = float(dd_durations.mean())
+
+    # Monthly returns breakdown
+    monthly_rets = results_df["net_return"].resample("ME").apply(
+        lambda x: (1 + x).prod() - 1 if len(x) > 0 else 0
+    )
+    if len(monthly_rets) > 0:
+        summary["best_month"] = float(monthly_rets.max())
+        summary["worst_month"] = float(monthly_rets.min())
+        summary["pct_positive_months"] = float((monthly_rets > 0).mean())
+        summary["monthly_returns"] = {
+            str(d.date()): round(float(v), 6) for d, v in monthly_rets.items()
+        }
+
     # Save model
     if models:
         model_path = os.path.join(cfg.model_dir, f"latest_{model_type}_model.pkl")
