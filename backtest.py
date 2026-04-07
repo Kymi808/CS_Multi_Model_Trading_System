@@ -235,6 +235,20 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
         fmp_feats = {}
 
     # ==================================================================
+    # 5.7 OPENBB ALTERNATIVE DATA (options + short interest)
+    # ==================================================================
+    _log_step(5.7, "OpenBB alternative data (options, short interest)")
+    openbb_feats = {}
+    try:
+        from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
+        options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir)
+        short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir)
+        openbb_feats = build_openbb_features(options_data, short_data, prices)
+        logger.info(f"OpenBB signals: {len(openbb_feats)}")
+    except Exception as e:
+        logger.info(f"OpenBB features skipped: {e}")
+
+    # ==================================================================
     # 6. BUILD ALL FEATURES (with interactions + new data sources)
     # ==================================================================
     _log_step(6, "Feature engineering (with institutional interactions)")
@@ -244,6 +258,7 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
         cross_asset_feats={**sent_feats, **ca_feats},
         insider_feats=insider_feats,
         fmp_feats=fmp_feats,
+        openbb_feats=openbb_feats,
         sector_map=sector_map,
     )
     h = cfg.features.primary_target_horizon

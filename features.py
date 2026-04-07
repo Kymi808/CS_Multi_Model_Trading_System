@@ -176,6 +176,7 @@ def build_all_features(
     cross_asset_feats: Optional[Dict] = None,
     insider_feats: Optional[Dict] = None,
     fmp_feats: Optional[Dict] = None,
+    openbb_feats: Optional[Dict] = None,
     sector_map: Optional[Dict[str, str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
@@ -239,6 +240,11 @@ def build_all_features(
     if fmp_feats:
         all_feats.update(fmp_feats)
         logger.info(f"  + FMP fundamentals: {len(fmp_feats)} features")
+
+    # Add OpenBB alternative data (options + short interest)
+    if openbb_feats:
+        all_feats.update(openbb_feats)
+        logger.info(f"  + OpenBB: {len(openbb_feats)} features")
 
     # Add interaction features (institutional cross-factor combinations)
     # Must come AFTER all base features are computed
