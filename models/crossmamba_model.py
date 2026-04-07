@@ -420,13 +420,8 @@ class CrossMambaRanker:
                 dropout=self.cfg.dropout,
             ).to(self.device)
 
-            # JIT compile for GPU acceleration (PyTorch 2.x)
-            if self.device.type == "cuda":
-                try:
-                    model = torch.compile(model, mode="reduce-overhead")
-                    logger.info(f"  CrossMamba compiled with torch.compile")
-                except Exception:
-                    pass  # torch.compile not available on older PyTorch
+            # torch.compile disabled: with only 3 epochs per walk-forward window,
+            # the JIT compilation overhead exceeds the training speedup.
 
             optimizer = torch.optim.AdamW(
                 model.parameters(),
