@@ -26,6 +26,8 @@ from fundamental_features import build_fundamental_features
 from cross_asset_features import build_cross_asset_features
 from sentiment_features import fetch_news_sentiment, build_sentiment_features
 from features import build_all_features, panel_to_ml_format
+from fmp_features import fetch_fmp_fundamentals, build_fmp_features
+from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
 from model import EnsembleRanker
 from risk_model import FactorRiskModel
 from portfolio import PortfolioConstructor
@@ -144,12 +146,32 @@ class SignalGenerator:
             self.cfg.features.cross_asset_windows,
         )
 
+        # 5b. FMP point-in-time fundamentals
+        fmp_feats = {}
+        try:
+            fmp_data = fetch_fmp_fundamentals(tickers, self.cfg.data.fmp_api_key, self.cfg.data_dir)
+            fmp_feats = build_fmp_features(fmp_data, prices)
+        except Exception as e:
+            logger.debug(f"FMP features skipped: {e}")
+
+        # 5c. OpenBB alternative data (live mode — production signals)
+        openbb_feats = {}
+        try:
+            options_data = fetch_options_data(tickers, cache_dir=self.cfg.data_dir, live_mode=True)
+            short_data = fetch_short_interest(tickers, cache_dir=self.cfg.data_dir, live_mode=True)
+            openbb_feats = build_openbb_features(options_data, short_data, prices)
+        except Exception as e:
+            logger.debug(f"OpenBB features skipped: {e}")
+
         # 6. Build features
         logger.info("Building features...")
         features, targets = build_all_features(
             prices, volumes, self.cfg.features,
             fundamental_feats=fund_feats,
             cross_asset_feats={**sent_feats, **ca_feats},
+            fmp_feats=fmp_feats,
+            openbb_feats=openbb_feats,
+            sector_map=self.sector_map,
         )
 
         # Convert panel to ML format (same as backtest's panel_to_ml_format)

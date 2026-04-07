@@ -207,8 +207,8 @@ def retrain(models_to_train: list[str] = None):
     openbb_feats = {}
     try:
         from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
-        options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir)
-        short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir)
+        options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir, live_mode=True)
+        short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir, live_mode=True)
         openbb_feats = build_openbb_features(options_data, short_data, prices)
         logger.info(f"  OpenBB signals: {len(openbb_feats)}")
     except Exception as e:

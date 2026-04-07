@@ -1,16 +1,20 @@
 """
 OpenBB-sourced alternative data features.
 
-Adds data that yfinance and Alpaca cannot provide:
-1. Options-implied signals (IV skew, put-call ratio)
-2. Short interest (SI% of float, days to cover, changes)
+IMPORTANT — BACKTEST vs PRODUCTION:
+- Options data (IV skew, put-call ratio) and short interest are SNAPSHOT data.
+  Free APIs do not provide historical time series.
+- In BACKTEST mode: these features are EXCLUDED to prevent look-ahead bias.
+  The model trains and backtests without them.
+- In PRODUCTION mode: these features are included as real-time signals.
+  The model sees current IV skew, put-call ratio, short interest alongside
+  price-based features. This is safe because production only acts on
+  current data.
 
-These are institutional-grade alpha signals used by quant firms.
-Requires: pip install openbb
-
-Falls back gracefully if OpenBB or provider API keys are unavailable.
-All features are optional — the model works without them but performs
-better with them.
+If you need these in backtest, you need a paid historical provider:
+- CBOE LiveVol for historical options chains
+- FINRA for bimonthly historical short interest reports
+- Quandl/Nasdaq Data Link for historical SI% of float
 
 References:
 - Bali & Hovakimian (2009), "Volatility Spreads and Expected Stock Returns"
@@ -39,18 +43,26 @@ except ImportError:
 def fetch_options_data(
     tickers: List[str],
     cache_dir: str = "data",
+    live_mode: bool = False,
 ) -> Dict[str, dict]:
     """
     Fetch options-implied signals for each ticker.
 
-    Key signals:
+    Args:
+        tickers: List of ticker symbols.
+        cache_dir: Directory for caching.
+        live_mode: If False (backtest), returns empty dict to prevent
+                   look-ahead bias. If True (production), fetches current data.
+
+    Key signals (production only):
     - IV skew: difference between OTM put IV and ATM call IV
-      (high skew = market pricing in downside risk)
     - Put-call ratio: volume of puts / volume of calls
-      (high ratio = bearish sentiment from informed traders)
-    - IV rank: current IV vs 1-year range
-      (high rank = expensive options, market expects movement)
+    - ATM implied volatility
     """
+    if not live_mode:
+        logger.info("OpenBB options: skipped in backtest mode (no historical data — would leak)")
+        return {}
+
     cache_file = os.path.join(cache_dir, "options_data.json")
 
     if os.path.exists(cache_file):
@@ -64,13 +76,12 @@ def fetch_options_data(
             pass
 
     if not OPENBB_AVAILABLE:
-        logger.info("OpenBB not installed — generating synthetic options data")
-        return _generate_synthetic_options(tickers)
+        logger.info("OpenBB not installed — no options data available")
+        return {}
 
     options_data = {}
     for ticker in tickers[:100]:  # limit to avoid rate limits
         try:
-            # Fetch options chain
             chain = obb.derivatives.options.chains(ticker)
             if chain is None:
                 continue
@@ -79,7 +90,6 @@ def fetch_options_data(
             if df.empty:
                 continue
 
-            # Compute IV skew (OTM puts vs ATM calls)
             calls = df[df["option_type"] == "call"] if "option_type" in df.columns else pd.DataFrame()
             puts = df[df["option_type"] == "put"] if "option_type" in df.columns else pd.DataFrame()
 
@@ -87,12 +97,11 @@ def fetch_options_data(
             if iv_col in df.columns:
                 call_iv = calls[iv_col].median() if len(calls) > 0 else 0
                 put_iv = puts[iv_col].median() if len(puts) > 0 else 0
-                iv_skew = put_iv - call_iv  # positive = bearish skew
+                iv_skew = put_iv - call_iv
             else:
                 iv_skew = 0
                 call_iv = 0
 
-            # Put-call volume ratio
             vol_col = "volume" if "volume" in df.columns else "vol"
             if vol_col in df.columns:
                 call_vol = calls[vol_col].sum() if len(calls) > 0 else 1
@@ -112,31 +121,35 @@ def fetch_options_data(
             continue
 
     # Cache
-    os.makedirs(cache_dir, exist_ok=True)
-    to_cache = dict(options_data)
-    to_cache["_date"] = datetime.now().strftime("%Y-%m-%d")
-    with open(cache_file, "w") as f:
-        json.dump(to_cache, f)
+    if options_data:
+        os.makedirs(cache_dir, exist_ok=True)
+        to_cache = dict(options_data)
+        to_cache["_date"] = datetime.now().strftime("%Y-%m-%d")
+        with open(cache_file, "w") as f:
+            json.dump(to_cache, f)
 
-    logger.info(f"Options data: {len(options_data)} tickers")
+    logger.info(f"Options data: {len(options_data)} tickers (live mode)")
     return options_data
 
 
 def fetch_short_interest(
     tickers: List[str],
     cache_dir: str = "data",
+    live_mode: bool = False,
 ) -> Dict[str, dict]:
     """
     Fetch short interest data.
 
-    Key signals:
-    - SI% of float: what fraction of tradeable shares are shorted
-      (high SI = crowded short, squeeze risk)
-    - Days to cover: SI / avg daily volume
-      (high DTC = shorts would take many days to cover)
-    - SI change: month-over-month change in short interest
-      (increasing SI = growing bearish conviction)
+    Args:
+        tickers: List of ticker symbols.
+        cache_dir: Directory for caching.
+        live_mode: If False (backtest), returns empty dict to prevent
+                   look-ahead bias. If True (production), fetches current data.
     """
+    if not live_mode:
+        logger.info("OpenBB short interest: skipped in backtest mode (no historical data — would leak)")
+        return {}
+
     cache_file = os.path.join(cache_dir, "short_interest.json")
 
     if os.path.exists(cache_file):
@@ -150,8 +163,8 @@ def fetch_short_interest(
             pass
 
     if not OPENBB_AVAILABLE:
-        logger.info("OpenBB not installed — generating synthetic short interest")
-        return _generate_synthetic_shorts(tickers)
+        logger.info("OpenBB not installed — no short interest data available")
+        return {}
 
     short_data = {}
     for ticker in tickers[:100]:
@@ -171,7 +184,6 @@ def fetch_short_interest(
                           latest.get("short_percent_of_float", 0)) or 0)
             dtc = float(latest.get("days_to_cover", 0) or 0)
 
-            # Compute change
             prior_si = float(prior.get("short_interest_pct_float",
                             prior.get("short_percent_of_float", 0)) or 0)
             si_change = si_pct - prior_si
@@ -186,13 +198,14 @@ def fetch_short_interest(
             logger.debug(f"Short interest failed for {ticker}: {e}")
             continue
 
-    os.makedirs(cache_dir, exist_ok=True)
-    to_cache = dict(short_data)
-    to_cache["_date"] = datetime.now().strftime("%Y-%m-%d")
-    with open(cache_file, "w") as f:
-        json.dump(to_cache, f)
+    if short_data:
+        os.makedirs(cache_dir, exist_ok=True)
+        to_cache = dict(short_data)
+        to_cache["_date"] = datetime.now().strftime("%Y-%m-%d")
+        with open(cache_file, "w") as f:
+            json.dump(to_cache, f)
 
-    logger.info(f"Short interest: {len(short_data)} tickers")
+    logger.info(f"Short interest: {len(short_data)} tickers (live mode)")
     return short_data
 
 
@@ -201,7 +214,19 @@ def build_openbb_features(
     short_data: Dict[str, dict],
     prices: pd.DataFrame,
 ) -> Dict[tuple, pd.DataFrame]:
-    """Build ML features from OpenBB options + short interest data."""
+    """
+    Build ML features from OpenBB options + short interest data.
+
+    In backtest mode, options_data and short_data will be empty dicts
+    (fetch functions return {} when live_mode=False), so this returns
+    no features. No look-ahead bias.
+
+    In production, current snapshot data is broadcast across the
+    prediction window (safe — we're only predicting forward from now).
+    """
+    if not options_data and not short_data:
+        return {}
+
     tickers = list(prices.columns)
     dates = prices.index
     feats = {}
@@ -218,19 +243,16 @@ def build_openbb_features(
 
     # Options features
     if options_data:
-        # IV skew: positive = market pricing in downside (bearish)
         iv_skew = {t: d.get("iv_skew", 0) for t, d in options_data.items()}
         df = _broadcast(iv_skew, "iv_skew")
         feats[("options", "iv_skew")] = df
         feats[("options", "cs_rank_iv_skew")] = _rank_cs(df)
 
-        # Put-call ratio: high = bearish informed flow
         pc_ratio = {t: d.get("put_call_ratio", 1.0) for t, d in options_data.items()}
         df = _broadcast(pc_ratio, "put_call_ratio")
         feats[("options", "put_call_ratio")] = df
         feats[("options", "cs_rank_put_call_ratio")] = _rank_cs(df)
 
-        # ATM implied volatility
         atm_iv = {t: d.get("atm_iv", 0) for t, d in options_data.items()}
         df = _broadcast(atm_iv, "atm_iv")
         feats[("options", "atm_iv")] = df
@@ -238,47 +260,20 @@ def build_openbb_features(
 
     # Short interest features
     if short_data:
-        # SI% of float: high = crowded short, squeeze risk
         si_pct = {t: d.get("si_pct_float", 0) for t, d in short_data.items()}
         df = _broadcast(si_pct, "si_pct_float")
         feats[("shorts", "si_pct_float")] = df
         feats[("shorts", "cs_rank_si_pct")] = _rank_cs(df)
 
-        # Days to cover: high = shorts are stuck
         dtc = {t: d.get("days_to_cover", 0) for t, d in short_data.items()}
         df = _broadcast(dtc, "days_to_cover")
         feats[("shorts", "days_to_cover")] = df
         feats[("shorts", "cs_rank_dtc")] = _rank_cs(df)
 
-        # SI change: increasing = growing bearish conviction
         si_chg = {t: d.get("si_change", 0) for t, d in short_data.items()}
         df = _broadcast(si_chg, "si_change")
         feats[("shorts", "si_change")] = df
         feats[("shorts", "cs_rank_si_change")] = _rank_cs(df)
 
-    logger.info(f"OpenBB features: {len(feats)} signals (options + short interest)")
+    logger.info(f"OpenBB features: {len(feats)} signals (production live data)")
     return feats
-
-
-def _generate_synthetic_options(tickers, seed=42):
-    rng = np.random.RandomState(seed)
-    return {
-        t: {
-            "iv_skew": float(rng.normal(0.02, 0.05)),
-            "put_call_ratio": float(rng.lognormal(0, 0.3)),
-            "atm_iv": float(rng.normal(0.25, 0.10)),
-        }
-        for t in tickers
-    }
-
-
-def _generate_synthetic_shorts(tickers, seed=42):
-    rng = np.random.RandomState(seed)
-    return {
-        t: {
-            "si_pct_float": float(rng.exponential(3)),
-            "days_to_cover": float(rng.exponential(2)),
-            "si_change": float(rng.normal(0, 1)),
-        }
-        for t in tickers
-    }

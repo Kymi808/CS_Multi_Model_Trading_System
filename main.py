@@ -95,6 +95,8 @@ def cmd_compare(args):
     from cross_asset_features import build_cross_asset_features
     from sentiment_features import fetch_news_sentiment, build_sentiment_features
     from features import build_all_features, panel_to_ml_format
+    from fmp_features import fetch_fmp_fundamentals, build_fmp_features
+    from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
     from backtest import select_features_by_ic
     from model_comparison import (
         run_comparison, print_comparison, save_comparison,
@@ -154,11 +156,23 @@ def cmd_compare(args):
     sect_etf = ca_prices[[c for c in cfg.data.sector_etfs if c in ca_prices.columns]] if not ca_prices.empty else pd.DataFrame()
     ca_feats = build_cross_asset_features(ca_only, prices, sect_etf, sector_map, cfg.features.cross_asset_windows)
 
+    # 5b. FMP point-in-time fundamentals (earnings revisions, surprise, PE)
+    fmp_data = fetch_fmp_fundamentals(tickers, api_key=cfg.data.fmp_api_key, cache_dir=cfg.data_dir)
+    fmp_feats = build_fmp_features(fmp_data, prices)
+
+    # 5c. OpenBB alternative data (production-only — skipped in backtest to prevent leakage)
+    options_data = fetch_options_data(tickers, cache_dir=cfg.data_dir, live_mode=False)
+    short_data = fetch_short_interest(tickers, cache_dir=cfg.data_dir, live_mode=False)
+    openbb_feats = build_openbb_features(options_data, short_data, prices)
+
     # 6. Feature engineering
     features, targets = build_all_features(
         prices, volumes, cfg.features,
         fundamental_feats=fund_feats,
         cross_asset_feats={**sent_feats, **ca_feats},
+        fmp_feats=fmp_feats,
+        openbb_feats=openbb_feats,
+        sector_map=sector_map,
     )
     h = cfg.features.primary_target_horizon
     target_key = f"fwd_rank_{h}d"
