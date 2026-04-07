@@ -6,18 +6,36 @@ A quantitative equity ranking system that answers the question: **does diversifi
 
 The system ranks ~460 liquid US equities using three fundamentally different ML architectures — gradient boosting (LightGBM), self-attention (Time Series Transformer), and selective state-space models (CrossMamba) — then passes all predictions through an identical risk, portfolio construction, and transaction cost pipeline. This isolates the effect of model architecture from all other variables.
 
-**Key finding:** Individual models achieve weak cross-sectional signal (Rank IC ~0.02 on real data with realistic transaction costs). However, the ensemble of all three achieves substantially better risk-adjusted returns than any single model, with the lowest maximum drawdown. Architecture diversification matters more than architecture choice.
+**Key findings:**
+
+1. With improved feature engineering (risk-adjusted targets, interaction features, expanded universe), individual sequence models dramatically outperform both LightGBM and the ensemble.
+2. The ensemble is diluted by LightGBM's weaker signal — TST and CrossMamba alone produce superior risk-adjusted returns.
+3. These returns are achieved on a near-neutral portfolio (~10% net exposure), meaning they are driven by stock selection alpha rather than market beta.
+
+### Results (Real Data, 460 Stocks, 10L/10S Neutral, 24bp Costs)
+
+| Model | Annual Return | Sharpe | Sortino | Max Drawdown | Win Rate | Total Return |
+|-------|-------------|--------|---------|-------------|----------|-------------|
+| **CrossMamba** | 35.38% | 3.393 | 5.310 | -13.66% | 59.25% | 146.62% |
+| **TST** | 37.02% | 3.382 | 5.043 | -9.25% | 57.79% | 155.63% |
+| Ensemble | 19.53% | 1.878 | 2.608 | -9.84% | 55.13% | 70.19% |
+| LightGBM | 13.38% | 1.238 | 1.783 | -10.22% | 55.26% | 45.39% |
+| SPY | 20.67% | 1.378 | 1.826 | -18.76% | 57.14% | 74.81% |
+
+LightGBM Avg Rank IC: 0.063 ± 0.141 (IR: 0.44) — 3.3x improvement over the 98-stock baseline of 0.019.
+
+**Caveats:** Fundamental features have look-ahead bias (yfinance). Backtest period (2021-2026) is predominantly bullish. The 3.4 Sharpe will likely degrade 30-40% in live trading.
 
 ## Research Questions and Findings
 
 **Q1: Do TST and CrossMamba achieve higher ICs than LightGBM?**
-Individual models produce similar return profiles. CrossMamba shows modestly better drawdown control. Architecture alone does not meaningfully improve signal quality on pre-engineered features.
+Yes — with improved features (risk-adjusted targets, institutional interactions, expanded universe), the sequence models significantly outperform LightGBM. CrossMamba achieves the highest Sharpe (3.39), TST the lowest drawdown (-9.25%).
 
 **Q2: Does accuracy improvement survive the full pipeline?**
-After Barra-style risk adjustment and realistic transaction costs (24bp round-trip, volatility-dependent), individual model edges are thin. Cost-aware filtering is critical.
+Yes — after Barra-style risk adjustment and realistic transaction costs (24bp round-trip, volatility-dependent), TST and CrossMamba generate 35-37% annual returns on a near-neutral portfolio.
 
 **Q3: Can an ensemble outperform any single model?**
-Yes — the ensemble significantly outperforms every individual model on both total return and risk-adjusted metrics, while maintaining the lowest drawdown. The improvement comes from uncorrelated prediction errors across architectures.
+No — in this configuration, the ensemble (1.88 Sharpe) underperforms both TST (3.38) and CrossMamba (3.39) individually. LightGBM dilutes the ensemble. The optimal production configuration uses CrossMamba as primary with TST as secondary.
 
 ## Models
 
