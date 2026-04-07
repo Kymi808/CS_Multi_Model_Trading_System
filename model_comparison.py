@@ -30,6 +30,7 @@ def run_single_model_pipeline(
     volumes: pd.DataFrame,
     fundamentals: dict,
     sector_map: dict,
+    fmp_historical: dict = None,
 ) -> Tuple[pd.DataFrame, dict, pd.DataFrame]:
     """
     Run a single model through the full pipeline:
@@ -64,7 +65,11 @@ def run_single_model_pipeline(
     # Risk model
     risk = FactorRiskModel(cfg.risk)
     if len(prices) > 252:
-        risk.estimate(prices, fundamentals, prices.index[-1], lookback=504)
+        _fund = fundamentals
+        if fmp_historical:
+            from fmp_features import get_pit_fundamentals
+            _fund = get_pit_fundamentals(fmp_historical, str(prices.index[-1].date()))
+        risk.estimate(prices, _fund or fundamentals, prices.index[-1], lookback=504)
         risk.update_regime(prices)
 
     # Portfolio construction
@@ -95,7 +100,11 @@ def run_single_model_pipeline(
 
         if di - last_risk_estimate >= risk_reestimate_every:
             if date in prices.index:
-                risk.estimate(prices, fundamentals, date, lookback=504)
+                _fund_at_date = fundamentals
+                if fmp_historical:
+                    from fmp_features import get_pit_fundamentals
+                    _fund_at_date = get_pit_fundamentals(fmp_historical, str(date.date()))
+                risk.estimate(prices, _fund_at_date or fundamentals, date, lookback=504)
                 risk.update_regime(prices.loc[:date])
                 last_risk_estimate = di
 
@@ -284,6 +293,7 @@ def run_comparison(
     fundamentals: dict,
     sector_map: dict,
     selected_features: list,
+    fmp_historical: dict = None,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, dict], dict]:
     """
     Run all models through the same pipeline and compare.
@@ -308,6 +318,7 @@ def run_comparison(
             prices=prices, volumes=volumes,
             fundamentals=fundamentals,
             sector_map=sector_map,
+            fmp_historical=fmp_historical,
         )
 
         all_results[model_type] = results_df
@@ -329,7 +340,11 @@ def run_comparison(
             # Run ensemble through portfolio pipeline
             risk = FactorRiskModel(cfg.risk)
             if len(prices) > 252:
-                risk.estimate(prices, fundamentals, prices.index[-1], lookback=504)
+                _fund = fundamentals
+                if fmp_historical:
+                    from fmp_features import get_pit_fundamentals
+                    _fund = get_pit_fundamentals(fmp_historical, str(prices.index[-1].date()))
+                risk.estimate(prices, _fund or fundamentals, prices.index[-1], lookback=504)
                 risk.update_regime(prices)
 
             constructor = PortfolioConstructor(cfg.portfolio)
@@ -358,7 +373,11 @@ def run_comparison(
 
                 if di - last_risk_estimate >= risk_reestimate_every:
                     if date in prices.index:
-                        risk.estimate(prices, fundamentals, date, lookback=504)
+                        _fund_at_date = fundamentals
+                        if fmp_historical:
+                            from fmp_features import get_pit_fundamentals
+                            _fund_at_date = get_pit_fundamentals(fmp_historical, str(date.date()))
+                        risk.estimate(prices, _fund_at_date or fundamentals, date, lookback=504)
                         risk.update_regime(prices.loc[:date])
                         last_risk_estimate = di
 

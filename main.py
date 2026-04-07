@@ -242,6 +242,7 @@ def cmd_compare(args):
         fundamentals=fundamentals,
         sector_map=sector_map,
         selected_features=selected_features,
+        fmp_historical=fmp_historical,
     )
 
     # ============================================================
