@@ -9,3 +9,6 @@ lxml>=4.9.0
 alpaca-py>=0.21.0
 torch>=2.0.0
 hmmlearn>=0.3.0
+# Optional: mamba-ssm for 10-50x faster CrossMamba on GPU
+# pip install mamba-ssm causal-conv1d
+# Only works on Linux with CUDA. Falls back to Python scan without it.
