@@ -58,7 +58,7 @@ class FeatureConfig:
     # Target
     target_horizons: List[int] = field(default_factory=lambda: [1, 5, 10, 21])
     primary_target_horizon: int = 10  # 10d better for fundamental signals
-    target_type: str = "risk_adjusted"  # "raw_rank", "risk_adjusted", "industry_relative"
+    target_type: str = "raw_rank"  # "raw_rank", "risk_adjusted", "industry_relative"
 
     # Feature selection
     max_features: int = 50  # validated: 50 features produced 3.4 Sharpe. 65 overfits LightGBM.
