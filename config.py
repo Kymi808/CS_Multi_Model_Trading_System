@@ -61,7 +61,7 @@ class FeatureConfig:
     target_type: str = "risk_adjusted"  # "raw_rank", "risk_adjusted", "industry_relative"
 
     # Feature selection
-    max_features: int = 65  # raised from 50 to accommodate interaction + new features
+    max_features: int = 50  # keep at 50 (validated in Colab comparison). Raise to 65 after FMP activation.
 
 
 @dataclass
