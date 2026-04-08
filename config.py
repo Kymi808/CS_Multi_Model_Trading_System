@@ -134,7 +134,7 @@ class ComparisonConfig:
     ])
     run_ensemble: bool = True
     ensemble_weights: Dict[str, float] = field(default_factory=lambda: {
-        "tst": 1.00,
+        "lightgbm": 0.34, "tst": 0.33, "crossmamba": 0.33,
     })
 
 
