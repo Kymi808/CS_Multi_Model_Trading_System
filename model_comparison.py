@@ -381,28 +381,42 @@ def run_comparison(
                 # patterns (e.g., momentum works in bull, mean-reversion in bear).
                 try:
                     from hmm_regime import HMMRegimeDetector
-                    hmm = HMMRegimeDetector(n_states=3, refit_every=63, min_train_days=504)
-                    price_dates = prices.index
+                    from data_loader import fetch_cross_asset_data
 
-                    # Compute regime once every 63 days (quarterly), not every date
-                    regime_by_date = {}
-                    last_bull_prob = 0.33
-                    refit_interval = 63
+                    # Load cross-asset data for HMM observables (VIX, yields, credit)
+                    ca_tickers = cfg.data.cross_asset_tickers
+                    ca_data = fetch_cross_asset_data(
+                        ca_tickers, prices.index[0].strftime("%Y-%m-%d"),
+                        prices.index[-1].strftime("%Y-%m-%d"), cache_dir=cfg.data_dir,
+                    )
 
-                    for i, d in enumerate(unique_pred_dates):
-                        if d in price_dates:
-                            d_idx = price_dates.get_loc(d)
-                            # Only refit HMM every 63 dates and when enough history
-                            if d_idx >= 504 and i % refit_interval == 0:
-                                state = hmm.detect(prices.iloc[:d_idx + 1])
-                                last_bull_prob = state.regime_probabilities.get("bull", 0.33)
-                        regime_by_date[d] = last_bull_prob
+                    if not ca_data.empty and len(ca_data) > 504:
+                        hmm = HMMRegimeDetector(n_states=3, refit_every=63, min_train_days=504)
+                        obs = hmm.prepare_observations(ca_data)
 
-                    X_stacked["hmm_bull_prob"] = pred_dates.map(
-                        lambda d: regime_by_date.get(d, 0.33)
-                    ).values
-                    logger.info(f"Stacking: added HMM regime feature "
-                                f"(mean bull prob={X_stacked['hmm_bull_prob'].mean():.3f})")
+                        regime_by_date = {}
+                        last_bull_prob = 0.33
+                        refit_interval = 63
+                        price_dates = prices.index
+
+                        for i, d in enumerate(unique_pred_dates):
+                            if d in price_dates:
+                                d_idx = price_dates.get_loc(d)
+                                if d_idx >= 504 and i % refit_interval == 0:
+                                    # Fit on data up to this date, then predict
+                                    obs_to_date = obs[:d_idx + 1]
+                                    hmm.fit(obs_to_date)
+                                    state = hmm.predict(obs_to_date)
+                                    last_bull_prob = state.regime_probabilities.get("bull", 0.33)
+                            regime_by_date[d] = last_bull_prob
+
+                        X_stacked["hmm_bull_prob"] = pred_dates.map(
+                            lambda d: regime_by_date.get(d, 0.33)
+                        ).values
+                        logger.info(f"Stacking: added HMM regime feature "
+                                    f"(mean bull prob={X_stacked['hmm_bull_prob'].mean():.3f})")
+                    else:
+                        logger.warning("HMM regime feature skipped: insufficient cross-asset data")
                 except Exception as e:
                     logger.warning(f"HMM regime feature skipped: {e}")
 
