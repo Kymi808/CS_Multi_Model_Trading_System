@@ -307,125 +307,19 @@ def run_comparison(
     all_predictions = {}
     all_metrics = {}
 
-    # Ensure LightGBM runs first for stacking (its OOS preds become a feature for TST)
-    if "lightgbm" in models_to_run:
-        ordered = ["lightgbm"] + [m for m in models_to_run if m != "lightgbm"]
-    else:
-        ordered = list(models_to_run)
-
-    lgbm_oos_preds = None
-    X_stacked = X  # default: no stacking
-
-    for model_type in ordered:
+    for model_type in models_to_run:
         logger.info(f"\n{'#'*60}")
         logger.info(f"# MODEL: {model_type.upper()}")
         logger.info(f"{'#'*60}")
 
-        # For TST: use X augmented with LightGBM OOS predictions (stacking)
-        X_for_model = X_stacked if (model_type == "tst" and lgbm_oos_preds is not None) else X
-
         results_df, summary, metrics_df, oos_preds = run_single_model_pipeline(
             model_type=model_type,
-            X=X_for_model, y=y, cfg=cfg,
+            X=X, y=y, cfg=cfg,
             prices=prices, volumes=volumes,
             fundamentals=fundamentals,
             sector_map=sector_map,
             fmp_historical=fmp_historical,
         )
-
-        # After LightGBM, merge its OOS predictions + meta-features into X for TST
-        if model_type == "lightgbm" and not oos_preds.empty:
-            lgbm_oos_preds = oos_preds
-            if isinstance(X.index, pd.MultiIndex):
-                X_stacked = X.copy()
-
-                # Feature 1: Confidence-weighted LightGBM prediction
-                # Ref: López de Prado (2018), "Advances in Financial ML", Ch. 3 (Meta-Labeling)
-                # Pre-computes prediction × rolling IC so TST doesn't need to learn
-                # the interaction in just 3 epochs. High rolling IC amplifies the
-                # prediction, low/negative IC suppresses it.
-                lgbm_pred = oos_preds.rename("lgbm_oos_pred").reindex(X_stacked.index).fillna(0)
-
-                if "val_rank_ic" in metrics_df.columns and len(metrics_df) > 0:
-                    rolling_ic = metrics_df["val_rank_ic"].rolling(5, min_periods=1).mean()
-                    pred_dates = X_stacked.index.get_level_values(0)
-                    unique_pred_dates = sorted(pred_dates.unique())
-
-                    ic_values = rolling_ic.values
-                    retrain_every = cfg.model.retrain_every_days
-                    ic_by_date = {}
-                    for wi, ic_val in enumerate(ic_values):
-                        start_idx = wi * retrain_every
-                        end_idx = min((wi + 1) * retrain_every, len(unique_pred_dates))
-                        for di in range(start_idx, end_idx):
-                            if di < len(unique_pred_dates):
-                                ic_by_date[unique_pred_dates[di]] = float(ic_val)
-
-                    rolling_ic_series = pred_dates.map(
-                        lambda d: ic_by_date.get(d, 0.0)
-                    ).values
-
-                    X_stacked["lgbm_confidence_weighted"] = lgbm_pred.values * rolling_ic_series
-                    logger.info(f"Stacking: added confidence-weighted LightGBM prediction "
-                                f"(mean={X_stacked['lgbm_confidence_weighted'].mean():.4f})")
-                else:
-                    # No IC data — fall back to raw prediction
-                    X_stacked["lgbm_confidence_weighted"] = lgbm_pred.values
-                    logger.info("Stacking: added raw LightGBM prediction (no IC data)")
-
-                # Feature 3: HMM regime probability (bull/bear/sideways)
-                # Ref: Ang & Timmermann (2012), "Regime Changes and Financial Markets"
-                # Ref: Hamilton (1989), "A New Approach to the Economic Analysis of
-                #       Nonstationary Time Series and the Business Cycle"
-                # Tells TST the current market regime so it can learn regime-conditional
-                # patterns (e.g., momentum works in bull, mean-reversion in bear).
-                try:
-                    from hmm_regime import HMMRegimeDetector
-                    from data_loader import fetch_cross_asset_data
-
-                    # Load cross-asset data for HMM observables (VIX, yields, credit)
-                    ca_tickers = cfg.data.cross_asset_tickers
-                    ca_data = fetch_cross_asset_data(
-                        ca_tickers, prices.index[0].strftime("%Y-%m-%d"),
-                        prices.index[-1].strftime("%Y-%m-%d"), cache_dir=cfg.data_dir,
-                    )
-
-                    if not ca_data.empty and len(ca_data) > 504:
-                        hmm = HMMRegimeDetector(n_states=3, refit_every=63, min_train_days=504)
-                        obs = hmm.prepare_observations(ca_data)
-
-                        regime_by_date = {}
-                        last_bull_prob = 0.33
-                        refit_interval = 21  # monthly regime updates
-                        price_dates = prices.index
-
-                        for i, d in enumerate(unique_pred_dates):
-                            if d in price_dates:
-                                d_idx = price_dates.get_loc(d)
-                                if d_idx >= 504 and i % refit_interval == 0:
-                                    # Fit on data up to this date, then predict
-                                    obs_to_date = obs[:d_idx + 1]
-                                    hmm.fit(obs_to_date)
-                                    state = hmm.predict(obs_to_date)
-                                    last_bull_prob = state.regime_probabilities.get("bull", 0.33)
-                            regime_by_date[d] = last_bull_prob
-
-                        X_stacked["hmm_bull_prob"] = pred_dates.map(
-                            lambda d: regime_by_date.get(d, 0.33)
-                        ).values
-                        logger.info(f"Stacking: added HMM regime feature "
-                                    f"(mean bull prob={X_stacked['hmm_bull_prob'].mean():.3f})")
-                    else:
-                        logger.warning("HMM regime feature skipped: insufficient cross-asset data")
-                except Exception as e:
-                    logger.warning(f"HMM regime feature skipped: {e}")
-
-                n_stacked = sum(1 for c in X_stacked.columns
-                                if c not in X.columns)
-                logger.info(f"Stacking: {n_stacked} features added for TST "
-                            f"({lgbm_oos_preds.notna().sum()} LightGBM predictions)")
-            else:
-                X_stacked = X
 
         # Save OOS predictions to CSV for offline ensemble experiments
         if not oos_preds.empty:
