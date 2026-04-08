@@ -396,7 +396,7 @@ def run_comparison(
 
                         regime_by_date = {}
                         last_bull_prob = 0.33
-                        refit_interval = 63
+                        refit_interval = 21  # monthly regime updates
                         price_dates = prices.index
 
                         for i, d in enumerate(unique_pred_dates):
