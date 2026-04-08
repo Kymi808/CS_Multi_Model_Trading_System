@@ -406,7 +406,7 @@ class CrossMambaRanker:
             return {"n_train": 0, "n_features": n_features, "n_ensemble": 0}
 
         self.models = []
-        for seed_idx in range(min(3, getattr(self.cfg, "n_ensemble", 3))):
+        for seed_idx in range(min(2, getattr(self.cfg, "n_ensemble", 2))):
             seed = self.cfg.random_state + seed_idx * 100
             torch.manual_seed(seed)
             np.random.seed(seed)
