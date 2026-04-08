@@ -382,15 +382,21 @@ def run_comparison(
                 try:
                     from hmm_regime import HMMRegimeDetector
                     hmm = HMMRegimeDetector(n_states=3, refit_every=63, min_train_days=504)
-                    regime_by_date = {}
                     price_dates = prices.index
 
-                    for d in unique_pred_dates:
+                    # Compute regime once every 63 days (quarterly), not every date
+                    regime_by_date = {}
+                    last_bull_prob = 0.33
+                    refit_interval = 63
+
+                    for i, d in enumerate(unique_pred_dates):
                         if d in price_dates:
                             d_idx = price_dates.get_loc(d)
-                            if d_idx >= 504:
+                            # Only refit HMM every 63 dates and when enough history
+                            if d_idx >= 504 and i % refit_interval == 0:
                                 state = hmm.detect(prices.iloc[:d_idx + 1])
-                                regime_by_date[d] = state.regime_probabilities.get("bull", 0.33)
+                                last_bull_prob = state.regime_probabilities.get("bull", 0.33)
+                        regime_by_date[d] = last_bull_prob
 
                     X_stacked["hmm_bull_prob"] = pred_dates.map(
                         lambda d: regime_by_date.get(d, 0.33)
@@ -398,7 +404,7 @@ def run_comparison(
                     logger.info(f"Stacking: added HMM regime feature "
                                 f"(mean bull prob={X_stacked['hmm_bull_prob'].mean():.3f})")
                 except Exception as e:
-                    logger.debug(f"HMM regime feature skipped: {e}")
+                    logger.warning(f"HMM regime feature skipped: {e}")
 
                 n_stacked = sum(1 for c in X_stacked.columns
                                 if c not in X.columns)
