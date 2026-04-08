@@ -339,39 +339,39 @@ def run_comparison(
             if isinstance(X.index, pd.MultiIndex):
                 X_stacked = X.copy()
 
-                # Feature 1: LightGBM OOS predictions (cross-sectional signal)
-                X_stacked["lgbm_oos_pred"] = oos_preds.rename("lgbm_oos_pred")
-                X_stacked["lgbm_oos_pred"] = X_stacked["lgbm_oos_pred"].fillna(0)
-
-                # Feature 2: Rolling IC of LightGBM (model confidence)
+                # Feature 1: Confidence-weighted LightGBM prediction
                 # Ref: López de Prado (2018), "Advances in Financial ML", Ch. 3 (Meta-Labeling)
-                # Tracks how accurate LightGBM has been recently — TST learns to
-                # trust the stacked signal when rolling IC is high, ignore when low.
+                # Pre-computes prediction × rolling IC so TST doesn't need to learn
+                # the interaction in just 3 epochs. High rolling IC amplifies the
+                # prediction, low/negative IC suppresses it.
+                lgbm_pred = oos_preds.rename("lgbm_oos_pred").reindex(X_stacked.index).fillna(0)
+
                 if "val_rank_ic" in metrics_df.columns and len(metrics_df) > 0:
                     rolling_ic = metrics_df["val_rank_ic"].rolling(5, min_periods=1).mean()
-                    # Map each prediction date to the most recent rolling IC
-                    window_dates = metrics_df.index if hasattr(metrics_df, 'index') else range(len(metrics_df))
-                    # Get prediction dates from OOS predictions
                     pred_dates = X_stacked.index.get_level_values(0)
                     unique_pred_dates = sorted(pred_dates.unique())
 
-                    # Build a date→rolling_ic mapping from walk-forward windows
                     ic_values = rolling_ic.values
                     retrain_every = cfg.model.retrain_every_days
                     ic_by_date = {}
                     for wi, ic_val in enumerate(ic_values):
-                        # Each window covers retrain_every prediction dates
                         start_idx = wi * retrain_every
                         end_idx = min((wi + 1) * retrain_every, len(unique_pred_dates))
                         for di in range(start_idx, end_idx):
                             if di < len(unique_pred_dates):
                                 ic_by_date[unique_pred_dates[di]] = float(ic_val)
 
-                    X_stacked["lgbm_rolling_ic"] = pred_dates.map(
+                    rolling_ic_series = pred_dates.map(
                         lambda d: ic_by_date.get(d, 0.0)
                     ).values
-                    logger.info(f"Stacking: added rolling IC feature "
-                                f"(mean={X_stacked['lgbm_rolling_ic'].mean():.4f})")
+
+                    X_stacked["lgbm_confidence_weighted"] = lgbm_pred.values * rolling_ic_series
+                    logger.info(f"Stacking: added confidence-weighted LightGBM prediction "
+                                f"(mean={X_stacked['lgbm_confidence_weighted'].mean():.4f})")
+                else:
+                    # No IC data — fall back to raw prediction
+                    X_stacked["lgbm_confidence_weighted"] = lgbm_pred.values
+                    logger.info("Stacking: added raw LightGBM prediction (no IC data)")
 
                 # Feature 3: HMM regime probability (bull/bear/sideways)
                 # Ref: Ang & Timmermann (2012), "Regime Changes and Financial Markets"
