@@ -307,19 +307,52 @@ def run_comparison(
     all_predictions = {}
     all_metrics = {}
 
-    for model_type in models_to_run:
+    # Ensure LightGBM runs first for stacking (its OOS preds become a feature for TST)
+    if "lightgbm" in models_to_run:
+        ordered = ["lightgbm"] + [m for m in models_to_run if m != "lightgbm"]
+    else:
+        ordered = list(models_to_run)
+
+    lgbm_oos_preds = None
+    X_stacked = X  # default: no stacking
+
+    for model_type in ordered:
         logger.info(f"\n{'#'*60}")
         logger.info(f"# MODEL: {model_type.upper()}")
         logger.info(f"{'#'*60}")
 
+        # For TST: use X augmented with LightGBM OOS predictions (stacking)
+        X_for_model = X_stacked if (model_type == "tst" and lgbm_oos_preds is not None) else X
+
         results_df, summary, metrics_df, oos_preds = run_single_model_pipeline(
             model_type=model_type,
-            X=X, y=y, cfg=cfg,
+            X=X_for_model, y=y, cfg=cfg,
             prices=prices, volumes=volumes,
             fundamentals=fundamentals,
             sector_map=sector_map,
             fmp_historical=fmp_historical,
         )
+
+        # After LightGBM, merge its OOS predictions into X for TST stacking
+        if model_type == "lightgbm" and not oos_preds.empty:
+            lgbm_oos_preds = oos_preds
+            # Add LightGBM OOS predictions as a new feature column
+            lgbm_feat = oos_preds.rename("lgbm_oos_pred")
+            if isinstance(X.index, pd.MultiIndex):
+                # Align by (date, ticker) index
+                X_stacked = X.copy()
+                X_stacked["lgbm_oos_pred"] = lgbm_feat
+                X_stacked["lgbm_oos_pred"] = X_stacked["lgbm_oos_pred"].fillna(0)
+                logger.info(f"Stacking: added LightGBM OOS predictions as feature for TST "
+                            f"({lgbm_oos_preds.notna().sum()} predictions)")
+            else:
+                X_stacked = X
+
+        # Save OOS predictions to CSV for offline ensemble experiments
+        if not oos_preds.empty:
+            oos_path = os.path.join(cfg.results_dir, f"oos_predictions_{model_type}.csv")
+            oos_preds.to_csv(oos_path)
+            logger.info(f"Saved OOS predictions: {oos_path}")
 
         all_results[model_type] = results_df
         all_summaries[model_type] = summary
