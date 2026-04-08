@@ -31,7 +31,7 @@ FMP_BASE = "https://financialmodelingprep.com/stable"
 # Concurrency: 20 threads stays well under 750 req/min Premium limit
 # (20 threads × ~2 req/sec each = ~40 req/sec = 2,400 req/min theoretical,
 #  but FMP latency ~0.5-1s/req so actual is ~20-40 req/sec, under 750 with margin)
-MAX_WORKERS = 20
+MAX_WORKERS = 10
 
 
 def _fmp_get(endpoint: str, api_key: str, params: dict = None, timeout: float = 15.0):

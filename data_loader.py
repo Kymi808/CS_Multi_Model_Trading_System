@@ -438,7 +438,7 @@ def _fetch_earnings_dates_fmp(
             return None
 
     earnings = {}
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         future_to_ticker = {pool.submit(_fetch_one, t): t for t in tickers}
         for i, future in enumerate(as_completed(future_to_ticker)):
             ticker = future_to_ticker[future]

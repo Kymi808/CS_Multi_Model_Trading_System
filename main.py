@@ -157,6 +157,12 @@ def cmd_compare(args):
         except Exception as e:
             logger.warning(f"FMP historical failed: {e}")
 
+    # Brief cooldown to let FMP rate limit recover after historical fetch
+    import time as _time
+    if fmp_historical:
+        logger.info("Cooldown 10s before next FMP fetch stage...")
+        _time.sleep(10)
+
     earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
 
     if fmp_historical:
@@ -185,6 +191,9 @@ def cmd_compare(args):
     ca_feats = build_cross_asset_features(ca_only, prices, sect_etf, sector_map, cfg.features.cross_asset_windows)
 
     # 5b. FMP earnings alpha features (point-in-time with publication dates)
+    if cfg.data.fmp_api_key:
+        logger.info("Cooldown 10s before FMP earnings fetch...")
+        _time.sleep(10)
     fmp_feats = {}
     try:
         fmp_data = fetch_fmp_fundamentals(tickers, api_key=cfg.data.fmp_api_key, cache_dir=cfg.data_dir)

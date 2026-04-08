@@ -201,7 +201,7 @@ def fetch_fmp_fundamental_data(
         return fund if fund else None
 
     # Fetch all tickers concurrently (15 threads, each does 3-4 API calls)
-    MAX_WORKERS = 15
+    MAX_WORKERS = 8
     fundamentals = {}
     errors = 0
 
@@ -350,8 +350,9 @@ def fetch_fmp_historical_fundamentals(
 
         return records if records else None
 
-    # Fetch all tickers concurrently (10 threads — each does 4 API calls)
-    MAX_WORKERS = 10
+    # Fetch concurrently (5 threads — each does 4 API calls = ~20 concurrent)
+    # Conservative to stay under 750 req/min FMP Premium limit
+    MAX_WORKERS = 5
     all_data = {}
     errors = 0
 
@@ -510,7 +511,7 @@ def fetch_fmp_fundamentals(
     # Parallel fetch
     fmp_data = {}
     errors = 0
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         future_to_ticker = {pool.submit(_fetch_one_earnings, t): t for t in tickers}
         for i, future in enumerate(as_completed(future_to_ticker)):
             ticker = future_to_ticker[future]
