@@ -333,18 +333,77 @@ def run_comparison(
             fmp_historical=fmp_historical,
         )
 
-        # After LightGBM, merge its OOS predictions into X for TST stacking
+        # After LightGBM, merge its OOS predictions + meta-features into X for TST
         if model_type == "lightgbm" and not oos_preds.empty:
             lgbm_oos_preds = oos_preds
-            # Add LightGBM OOS predictions as a new feature column
-            lgbm_feat = oos_preds.rename("lgbm_oos_pred")
             if isinstance(X.index, pd.MultiIndex):
-                # Align by (date, ticker) index
                 X_stacked = X.copy()
-                X_stacked["lgbm_oos_pred"] = lgbm_feat
+
+                # Feature 1: LightGBM OOS predictions (cross-sectional signal)
+                X_stacked["lgbm_oos_pred"] = oos_preds.rename("lgbm_oos_pred")
                 X_stacked["lgbm_oos_pred"] = X_stacked["lgbm_oos_pred"].fillna(0)
-                logger.info(f"Stacking: added LightGBM OOS predictions as feature for TST "
-                            f"({lgbm_oos_preds.notna().sum()} predictions)")
+
+                # Feature 2: Rolling IC of LightGBM (model confidence)
+                # Ref: López de Prado (2018), "Advances in Financial ML", Ch. 3 (Meta-Labeling)
+                # Tracks how accurate LightGBM has been recently — TST learns to
+                # trust the stacked signal when rolling IC is high, ignore when low.
+                if "val_rank_ic" in metrics_df.columns and len(metrics_df) > 0:
+                    rolling_ic = metrics_df["val_rank_ic"].rolling(5, min_periods=1).mean()
+                    # Map each prediction date to the most recent rolling IC
+                    window_dates = metrics_df.index if hasattr(metrics_df, 'index') else range(len(metrics_df))
+                    # Get prediction dates from OOS predictions
+                    pred_dates = X_stacked.index.get_level_values(0)
+                    unique_pred_dates = sorted(pred_dates.unique())
+
+                    # Build a date→rolling_ic mapping from walk-forward windows
+                    ic_values = rolling_ic.values
+                    retrain_every = cfg.model.retrain_every_days
+                    ic_by_date = {}
+                    for wi, ic_val in enumerate(ic_values):
+                        # Each window covers retrain_every prediction dates
+                        start_idx = wi * retrain_every
+                        end_idx = min((wi + 1) * retrain_every, len(unique_pred_dates))
+                        for di in range(start_idx, end_idx):
+                            if di < len(unique_pred_dates):
+                                ic_by_date[unique_pred_dates[di]] = float(ic_val)
+
+                    X_stacked["lgbm_rolling_ic"] = pred_dates.map(
+                        lambda d: ic_by_date.get(d, 0.0)
+                    ).values
+                    logger.info(f"Stacking: added rolling IC feature "
+                                f"(mean={X_stacked['lgbm_rolling_ic'].mean():.4f})")
+
+                # Feature 3: HMM regime probability (bull/bear/sideways)
+                # Ref: Ang & Timmermann (2012), "Regime Changes and Financial Markets"
+                # Ref: Hamilton (1989), "A New Approach to the Economic Analysis of
+                #       Nonstationary Time Series and the Business Cycle"
+                # Tells TST the current market regime so it can learn regime-conditional
+                # patterns (e.g., momentum works in bull, mean-reversion in bear).
+                try:
+                    from hmm_regime import HMMRegimeDetector
+                    hmm = HMMRegimeDetector(n_states=3, refit_every=63, min_train_days=504)
+                    regime_by_date = {}
+                    price_dates = prices.index
+
+                    for d in unique_pred_dates:
+                        if d in price_dates:
+                            d_idx = price_dates.get_loc(d)
+                            if d_idx >= 504:
+                                state = hmm.detect(prices.iloc[:d_idx + 1])
+                                regime_by_date[d] = state.regime_probabilities.get("bull", 0.33)
+
+                    X_stacked["hmm_bull_prob"] = pred_dates.map(
+                        lambda d: regime_by_date.get(d, 0.33)
+                    ).values
+                    logger.info(f"Stacking: added HMM regime feature "
+                                f"(mean bull prob={X_stacked['hmm_bull_prob'].mean():.3f})")
+                except Exception as e:
+                    logger.debug(f"HMM regime feature skipped: {e}")
+
+                n_stacked = sum(1 for c in X_stacked.columns
+                                if c not in X.columns)
+                logger.info(f"Stacking: {n_stacked} features added for TST "
+                            f"({lgbm_oos_preds.notna().sum()} LightGBM predictions)")
             else:
                 X_stacked = X
 
