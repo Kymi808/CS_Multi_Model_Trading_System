@@ -46,14 +46,29 @@ class PortfolioConstructor:
         # Z-score normalize predictions cross-sectionally
         z_scores = (predictions - predictions.mean()) / (predictions.std() + 1e-8)
 
-        # Dynamic position selection: top/bottom 8% by percentile
-        # Robust to any prediction distribution (LightGBM, TST, CrossMamba)
-        n_universe = len(predictions)
-        n_per_side = max(15, min(40, int(n_universe * 0.08)))
+        # Z-score threshold selection: stocks with |z| > 1.0
+        # For LightGBM (~10 per side), TST/CrossMamba may produce more.
+        # Minimum 10 per side guaranteed.
+        z_threshold = 1.0
+        long_mask = z_scores > z_threshold
+        short_mask = z_scores < -z_threshold if self.cfg.long_short else pd.Series(False, index=z_scores.index)
 
-        sorted_z = z_scores.sort_values(ascending=False)
-        long_tickers = sorted_z.head(n_per_side).index.tolist()
-        short_tickers = sorted_z.tail(n_per_side).index.tolist() if self.cfg.long_short else []
+        # Ensure minimum 10 per side
+        if long_mask.sum() < 10:
+            long_mask = z_scores >= z_scores.nlargest(10).iloc[-1]
+        if self.cfg.long_short and short_mask.sum() < 10:
+            short_mask = z_scores <= z_scores.nsmallest(10).iloc[-1]
+
+        # Cap at 40 per side
+        if long_mask.sum() > 40:
+            top_n = z_scores[long_mask].nlargest(40).index
+            long_mask = z_scores.index.isin(top_n)
+        if short_mask.sum() > 40:
+            bot_n = z_scores[short_mask].nsmallest(40).index
+            short_mask = z_scores.index.isin(bot_n)
+
+        long_tickers = z_scores[long_mask].index.tolist()
+        short_tickers = z_scores[short_mask].index.tolist()
 
         # Signal-weighted: |z-score| × inverse volatility
         weights = pd.Series(0.0, index=predictions.index)
