@@ -317,19 +317,8 @@ class FactorRiskModel:
         weights *= self.compute_drawdown_scale()
         weights *= self.compute_tail_risk_scale(portfolio_returns)
 
-        # Re-clip positions (factor/sector neutralization can expand beyond target)
-        if len(weights[weights > 0]) > n_long:
-            long_w = weights[weights > 0].nlargest(n_long)
-        else:
-            long_w = weights[weights > 0]
-
-        if n_short > 0 and len(weights[weights < 0]) > n_short:
-            short_w = weights[weights < 0].nsmallest(n_short)
-        else:
-            short_w = weights[weights < 0]
-
-        weights = pd.concat([long_w, short_w])
-        weights = weights[weights.abs() > 0.005]
+        # Remove tiny positions (risk scaling can shrink some to near-zero)
+        weights = weights[weights.abs() > 0.003]
 
         # Regime overlay (after clip — scales weights, doesn't add positions)
         weights = self.apply_regime_overlay(weights)
