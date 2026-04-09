@@ -59,27 +59,24 @@ class PortfolioConstructor:
         # Step 1: Z-score normalize predictions cross-sectionally
         z_scores = (predictions - predictions.mean()) / (predictions.std() + 1e-8)
 
-        # Step 2: Select positions by conviction threshold
-        # Dynamic sizing: include all stocks with |z| > 1.0
-        # This typically selects top/bottom ~15% of universe
-        z_threshold = 1.0
-        long_mask = z_scores > z_threshold
-        short_mask = z_scores < -z_threshold
+        # Step 2: Select positions by percentile (top/bottom 15%)
+        # Percentile-based is robust to any prediction distribution —
+        # works for tightly-clustered LightGBM and wide-spread neural nets alike.
+        # 15% per side on 400 stocks ≈ 60 positions per side → high breadth
+        long_pct = 0.15   # top 15%
+        short_pct = 0.15  # bottom 15%
 
-        # Ensure minimum positions (at least 10 per side)
-        if long_mask.sum() < 10:
-            long_mask = z_scores >= z_scores.nlargest(10).iloc[-1]
-        if short_mask.sum() < 10 and self.cfg.long_short:
-            short_mask = z_scores <= z_scores.nsmallest(10).iloc[-1]
+        n_universe = len(predictions)
+        n_long = max(15, int(n_universe * long_pct))
+        n_short = max(15, int(n_universe * short_pct)) if self.cfg.long_short else 0
 
-        # Cap maximum positions to avoid over-diversification
-        max_per_side = min(50, len(predictions) // 4)
-        if long_mask.sum() > max_per_side:
-            top_n = z_scores[long_mask].nlargest(max_per_side).index
-            long_mask = z_scores.index.isin(top_n)
-        if short_mask.sum() > max_per_side:
-            bot_n = z_scores[short_mask].nsmallest(max_per_side).index
-            short_mask = z_scores.index.isin(bot_n)
+        # Cap at 50 per side
+        n_long = min(n_long, 50)
+        n_short = min(n_short, 50)
+
+        sorted_z = z_scores.sort_values(ascending=False)
+        long_mask = z_scores.index.isin(sorted_z.head(n_long).index)
+        short_mask = z_scores.index.isin(sorted_z.tail(n_short).index) if n_short > 0 else pd.Series(False, index=z_scores.index)
 
         long_tickers = z_scores[long_mask].index.tolist()
         short_tickers = z_scores[short_mask].index.tolist() if self.cfg.long_short else []
