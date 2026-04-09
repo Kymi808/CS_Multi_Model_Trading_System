@@ -60,8 +60,10 @@ class FeatureConfig:
     primary_target_horizon: int = 10  # 10d better for fundamental signals
     target_type: str = "raw_rank"  # "raw_rank", "risk_adjusted", "industry_relative"
 
-    # Feature selection
-    max_features: int = 50  # validated: 50 features produced 3.4 Sharpe. 65 overfits LightGBM.
+    # Feature selection — disabled cap, let LightGBM's built-in regularization
+    # (L1/L2, max_depth, min_child_samples) handle overfitting.
+    # Ref: Citadel/Two Sigma use 200-500+ features with regularization pruning.
+    max_features: int = 0  # 0 = no cap, use all features that pass stability screening
 
 
 @dataclass

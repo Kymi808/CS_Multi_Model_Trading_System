@@ -117,7 +117,11 @@ def select_features_by_ic(
         return list(X.columns)
 
     score_series = pd.Series(scores).sort_values(ascending=False)
-    selected = score_series[score_series >= min_abs_ic].head(max_features).index.tolist()
+    passing = score_series[score_series >= min_abs_ic]
+    if max_features > 0:
+        selected = passing.head(max_features).index.tolist()
+    else:
+        selected = passing.index.tolist()  # no cap — use all that pass IC threshold
 
     if len(selected) < 15:
         selected = score_series.head(min(30, len(score_series))).index.tolist()
