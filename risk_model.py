@@ -300,16 +300,18 @@ class FactorRiskModel:
         return 1.0
 
     def apply_risk_scaling(self, weights, portfolio_returns, sector_map,
-                           n_long: int = 15, n_short: int = 7):
+                           n_long: int = 40, n_short: int = 40):
         """
-        Full risk pipeline, used by backtest AND live trading:
+        Full risk pipeline:
         1. Sector neutralization
         2. Factor neutralization
         3. Vol targeting
         4. Drawdown control
-        5. Tail risk protection (gap-down, vol spike, consecutive losses)
-        6. Re-clip to n_long/n_short (prevents position drift)
-        7. Regime overlay (after clip so it gets full effect)
+        5. Tail risk protection
+        6. Gross leverage hard cap
+        7. Dollar neutrality enforcement
+        8. Position count cap
+        9. Regime overlay
         """
         weights = self.apply_sector_neutrality(weights, sector_map)
         weights = self.neutralize_factors(weights)
@@ -317,21 +319,37 @@ class FactorRiskModel:
         weights *= self.compute_drawdown_scale()
         weights *= self.compute_tail_risk_scale(portfolio_returns)
 
-        # Re-clip positions (factor/sector neutralization can expand beyond target)
+        # Remove tiny positions
+        weights = weights[weights.abs() > 0.003]
+
+        # Cap position count (prevents drift from risk adjustments)
         if len(weights[weights > 0]) > n_long:
             long_w = weights[weights > 0].nlargest(n_long)
         else:
             long_w = weights[weights > 0]
-
         if n_short > 0 and len(weights[weights < 0]) > n_short:
             short_w = weights[weights < 0].nsmallest(n_short)
         else:
             short_w = weights[weights < 0]
-
         weights = pd.concat([long_w, short_w])
-        weights = weights[weights.abs() > 0.005]
 
-        # Regime overlay (after clip — scales weights, doesn't add positions)
+        # Gross leverage hard cap
+        gross = weights.abs().sum()
+        max_gross = 1.6  # from PortfolioConfig default
+        if gross > max_gross:
+            weights *= max_gross / gross
+
+        # Re-enforce dollar neutrality
+        long_sum = weights[weights > 0].sum()
+        short_sum = weights[weights < 0].abs().sum()
+        if long_sum > 0 and short_sum > 0:
+            target = min(long_sum, short_sum, max_gross / 2)
+            weights[weights > 0] *= target / long_sum
+            weights[weights < 0] *= target / short_sum
+
+        weights = weights[weights.abs() > 0.003]
+
+        # Regime overlay
         weights = self.apply_regime_overlay(weights)
 
         return weights

@@ -36,49 +36,73 @@ class PortfolioConstructor:
             vol_estimates: ticker -> annualized volatility (for risk parity)
         """
         predictions = predictions.dropna()
-        if len(predictions) < self.cfg.max_positions_long + self.cfg.max_positions_short:
+        if len(predictions) < 20:
             return pd.Series(dtype=float)
 
-        # Apply turnover penalty: penalize changing positions
+        # Apply turnover penalty
         if prev_weights is not None and self.cfg.turnover_penalty > 0:
             predictions = self._apply_turnover_penalty(predictions, prev_weights)
 
-        # Select positions
-        sorted_preds = predictions.sort_values(ascending=False)
-        n_long = min(self.cfg.max_positions_long, len(predictions) // 2)
-        n_short = min(self.cfg.max_positions_short, len(predictions) // 2) if self.cfg.long_short else 0
-        long_tickers = sorted_preds.head(n_long).index.tolist()
-        short_tickers = sorted_preds.tail(n_short).index.tolist() if n_short > 0 else []
+        # Z-score normalize predictions cross-sectionally
+        z_scores = (predictions - predictions.mean()) / (predictions.std() + 1e-8)
 
-        # Compute weights
+        # Dynamic position selection: top/bottom 8% by percentile
+        # Robust to any prediction distribution (LightGBM, TST, CrossMamba)
+        n_universe = len(predictions)
+        n_per_side = max(15, min(40, int(n_universe * 0.08)))
+
+        sorted_z = z_scores.sort_values(ascending=False)
+        long_tickers = sorted_z.head(n_per_side).index.tolist()
+        short_tickers = sorted_z.tail(n_per_side).index.tolist() if self.cfg.long_short else []
+
+        # Signal-weighted: |z-score| × inverse volatility
         weights = pd.Series(0.0, index=predictions.index)
 
-        if self.cfg.weighting == "risk_parity" and vol_estimates is not None:
-            weights = self._risk_parity_weights(
-                long_tickers, short_tickers, vol_estimates
-            )
-        elif self.cfg.weighting == "equal":
-            weights = self._equal_weights(long_tickers, short_tickers)
+        long_z = z_scores[long_tickers].abs()
+        if vol_estimates is not None:
+            long_vols = vol_estimates.reindex(long_tickers).fillna(vol_estimates.median()).clip(lower=0.05)
+            long_signal = long_z / long_vols
         else:
-            weights = self._score_weights(
-                long_tickers, short_tickers, predictions
-            )
+            long_signal = long_z
+        if len(long_signal) > 0:
+            weights[long_tickers] = long_signal / long_signal.sum()
 
-        # Normalize to target leverage
-        weights = self._normalize_leverage(weights)
+        if short_tickers:
+            short_z = z_scores[short_tickers].abs()
+            if vol_estimates is not None:
+                short_vols = vol_estimates.reindex(short_tickers).fillna(vol_estimates.median()).clip(lower=0.05)
+                short_signal = short_z / short_vols
+            else:
+                short_signal = short_z
+            if len(short_signal) > 0:
+                weights[short_tickers] = -(short_signal / short_signal.sum())
 
-        # Apply position limits
-        weights = weights.clip(
-            lower=-self.cfg.max_position_pct,
-            upper=self.cfg.max_position_pct,
-        )
+        # Dollar-neutral leverage: equal dollars per side, capped at max_gross/2
+        target_per_side = self.cfg.max_gross_leverage / 2
+        long_sum = weights[weights > 0].sum()
+        short_sum = weights[weights < 0].abs().sum()
+        if long_sum > 0:
+            weights[weights > 0] *= target_per_side / long_sum
+        if short_sum > 0:
+            weights[weights < 0] *= target_per_side / short_sum
 
-        # Apply turnover limit
+        # Position limits
+        weights = weights.clip(-self.cfg.max_position_pct, self.cfg.max_position_pct)
+
+        # Re-balance after clipping to maintain dollar neutrality
+        long_sum = weights[weights > 0].sum()
+        short_sum = weights[weights < 0].abs().sum()
+        if long_sum > 0 and short_sum > 0:
+            avg_side = min(long_sum, short_sum, target_per_side)
+            weights[weights > 0] *= avg_side / long_sum
+            weights[weights < 0] *= avg_side / short_sum
+
+        # Turnover limit
         if prev_weights is not None:
             weights = self._apply_turnover_limit(weights, prev_weights)
 
         # Remove tiny positions
-        weights = weights[weights.abs() > 0.005]
+        weights = weights[weights.abs() > 0.003]
 
         return weights
 

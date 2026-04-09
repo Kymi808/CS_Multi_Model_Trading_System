@@ -202,6 +202,31 @@ def build_pit_fundamental_features(
         if latest_fund:
             _build_sector_relative_features(feats, latest_fund, tickers, dates, sector_map)
 
+    # --- PIT Quality Scores (computed from historical financials) ---
+    # Piotroski F-Score proxy: quality signals from available ratios
+    # Full Piotroski needs 9 criteria from income/balance/cash flow.
+    # We approximate with available PIT ratios.
+    roe_df = _broadcast_pit(historical_data, "returnOnEquity", prices.columns.tolist(), dates)
+    roa_df = _broadcast_pit(historical_data, "returnOnAssets", prices.columns.tolist(), dates)
+    margin_df = _broadcast_pit(historical_data, "grossMargins", prices.columns.tolist(), dates)
+    cr_df = _broadcast_pit(historical_data, "currentRatio", prices.columns.tolist(), dates)
+
+    # Piotroski-like composite: sum of binary quality signals
+    quality_score = pd.DataFrame(0.0, index=dates, columns=prices.columns)
+    if roe_df.notna().sum().sum() > 0:
+        quality_score += (roe_df > 0).astype(float)           # Positive ROE
+        quality_score += (roe_df > roe_df.shift(63)).astype(float)  # Improving ROE
+    if roa_df.notna().sum().sum() > 0:
+        quality_score += (roa_df > 0).astype(float)           # Positive ROA
+    if margin_df.notna().sum().sum() > 0:
+        quality_score += (margin_df > margin_df.shift(63)).astype(float)  # Improving margins
+    if cr_df.notna().sum().sum() > 0:
+        quality_score += (cr_df > 1.0).astype(float)          # Current ratio > 1
+
+    if quality_score.sum().sum() > 0:
+        feats[("quality", "pit_piotroski_proxy")] = quality_score
+        feats[("quality", "cs_rank_piotroski_proxy")] = _rank_cross_sectional(quality_score)
+
     if not feats:
         logger.warning("No PIT fundamental features built")
         return feats

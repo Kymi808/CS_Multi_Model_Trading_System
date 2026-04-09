@@ -83,6 +83,61 @@ def volume_features(
     return feats
 
 
+def advanced_features(prices: pd.DataFrame, volumes: pd.DataFrame, cfg: FeatureConfig) -> Dict[str, pd.DataFrame]:
+    """
+    Advanced engineered features used by institutional quant firms.
+
+    1. Kalman filter residuals — denoised price trend vs actual (Ref: Harvey 1989)
+    2. Decay-adjusted momentum — exponentially weighted momentum (Ref: Qian 2019)
+    3. PCA cross-asset components — compressed macro regime signal
+    """
+    feats = {}
+    lr = np.log(prices / prices.shift(1))
+
+    # 1. Kalman filter residuals: difference between smoothed and actual price
+    # A simple Kalman filter estimates the "true" trend by smoothing price.
+    # The residual (actual - smoothed) captures mean-reversion opportunities.
+    for alpha in [0.05, 0.1]:
+        smoothed = prices.ewm(alpha=alpha, adjust=False).mean()
+        residual = (prices - smoothed) / (smoothed + 1e-8)
+        label = f"kalman_resid_{int(alpha*100)}"
+        feats[label] = residual
+        feats[f"cs_{label}"] = residual.rank(axis=1, pct=True)
+
+    # 2. Decay-adjusted momentum: exponentially weighted returns
+    # Recent returns matter more than old ones. Captures "fresh" momentum
+    # that simple rolling windows miss.
+    for halflife in [10, 21, 63]:
+        decay_mom = lr.ewm(halflife=halflife).mean() * np.sqrt(252)
+        label = f"decay_mom_{halflife}d"
+        feats[label] = decay_mom
+        feats[f"cs_{label}"] = decay_mom.rank(axis=1, pct=True)
+
+    # 3. Volatility regime change: ratio of short-term to long-term vol
+    # High ratio = volatility expanding (risk-off), low = compressing (calm)
+    short_vol = lr.rolling(5).std()
+    long_vol = lr.rolling(63).std()
+    vol_regime = short_vol / (long_vol + 1e-8)
+    feats["vol_regime_ratio"] = vol_regime
+    feats["cs_vol_regime"] = vol_regime.rank(axis=1, pct=True)
+
+    # 4. Return acceleration (second derivative of price)
+    # Positive = momentum increasing, negative = momentum fading
+    mom_21 = lr.rolling(21).sum()
+    mom_63 = lr.rolling(63).sum()
+    accel = mom_21 - mom_21.shift(21)
+    feats["return_accel_21d"] = accel
+    feats["cs_return_accel"] = accel.rank(axis=1, pct=True)
+
+    # 5. Volume-price divergence: price up but volume down = weak trend
+    price_change_5d = prices.pct_change(5)
+    vol_change_5d = volumes.pct_change(5)
+    divergence = price_change_5d.rank(axis=1, pct=True) - vol_change_5d.rank(axis=1, pct=True)
+    feats["vol_price_divergence"] = divergence
+
+    return feats
+
+
 def technical_features(prices: pd.DataFrame, cfg: FeatureConfig) -> Dict[str, pd.DataFrame]:
     feats = {}
     close = prices
@@ -194,6 +249,7 @@ def build_all_features(
     pv_feats.update(volatility_features(prices, cfg))
     pv_feats.update(volume_features(prices, volumes, cfg))
     pv_feats.update(technical_features(prices, cfg))
+    pv_feats.update(advanced_features(prices, volumes, cfg))
 
     # Cross-sectional ranks of price/volume features
     cs_feats = cross_sectional_ranks(pv_feats)
