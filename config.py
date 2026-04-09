@@ -163,10 +163,10 @@ class PortfolioConfig:
     long_short: bool = True
     max_position_pct: float = 0.10
     max_gross_leverage: float = 1.6
-    max_net_leverage: float = 0.15
-    max_daily_turnover: float = 0.40
+    max_net_leverage: float = 0.10    # strict: institutional stat-arb targets ~0% net
+    max_daily_turnover: float = 0.20   # tighter: more positions = less turnover needed per position
     min_holding_days: int = 1
-    turnover_penalty: float = 0.001
+    turnover_penalty: float = 0.003   # stronger penalty for churning positions
     # Realistic transaction costs (conservative estimates for production)
     # Alpaca is commission-free but has payment-for-order-flow spread costs
     commission_bps: float = 1.0       # effective PFOF cost ~1bp

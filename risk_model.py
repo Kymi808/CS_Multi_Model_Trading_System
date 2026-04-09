@@ -300,16 +300,17 @@ class FactorRiskModel:
         return 1.0
 
     def apply_risk_scaling(self, weights, portfolio_returns, sector_map,
-                           n_long: int = 15, n_short: int = 7):
+                           n_long: int = 50, n_short: int = 50):
         """
-        Full risk pipeline, used by backtest AND live trading:
+        Institutional risk pipeline:
         1. Sector neutralization
         2. Factor neutralization
         3. Vol targeting
         4. Drawdown control
-        5. Tail risk protection (gap-down, vol spike, consecutive losses)
-        6. Re-clip to n_long/n_short (prevents position drift)
-        7. Regime overlay (after clip so it gets full effect)
+        5. Tail risk protection
+        6. Gross leverage hard cap
+        7. Dollar neutrality enforcement
+        8. Regime overlay
         """
         weights = self.apply_sector_neutrality(weights, sector_map)
         weights = self.neutralize_factors(weights)
@@ -317,10 +318,31 @@ class FactorRiskModel:
         weights *= self.compute_drawdown_scale()
         weights *= self.compute_tail_risk_scale(portfolio_returns)
 
-        # Remove tiny positions (risk scaling can shrink some to near-zero)
+        # Remove tiny positions
         weights = weights[weights.abs() > 0.003]
 
-        # Regime overlay (after clip — scales weights, doesn't add positions)
+        # Hard cap on gross leverage (prevents leverage explosion)
+        # Standard stat-arb: 1.6x gross = 0.8x per side
+        gross = weights.abs().sum()
+        max_gross = getattr(self.cfg, 'max_gross_leverage', 1.6)
+        if hasattr(self, '_portfolio_cfg_max_gross'):
+            max_gross = self._portfolio_cfg_max_gross
+        if gross > max_gross:
+            weights *= max_gross / gross
+
+        # Re-enforce dollar neutrality after risk scaling
+        # Risk adjustments (vol, drawdown, tail) can break the balance
+        long_sum = weights[weights > 0].sum()
+        short_sum = weights[weights < 0].abs().sum()
+        if long_sum > 0 and short_sum > 0:
+            # Scale both sides to equal dollar value
+            target_per_side = min(long_sum, short_sum)
+            # Cap at half of max gross leverage
+            target_per_side = min(target_per_side, max_gross / 2)
+            weights[weights > 0] *= target_per_side / long_sum
+            weights[weights < 0] *= target_per_side / short_sum
+
+        # Regime overlay (after neutrality — scales weights, doesn't add positions)
         weights = self.apply_regime_overlay(weights)
 
         return weights
