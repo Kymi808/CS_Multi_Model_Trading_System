@@ -1,17 +1,10 @@
 """
-Institutional portfolio construction: signal-weighted, dollar-neutral, constraint-optimized.
+Portfolio construction: concentrated, sector-neutral, risk-parity weighted.
 
-Architecture (standard stat-arb / market-neutral):
-1. Z-score normalize predictions cross-sectionally
-2. Include all stocks above/below conviction threshold (dynamic position count)
-3. Weight proportional to z-score magnitude × inverse volatility (signal-risk-parity)
-4. Enforce strict dollar neutrality (long $ = short $)
-5. Apply constraints: max position, sector limits, turnover limits, vol target
-
-References:
-- Grinold & Kahn (2000), "Active Portfolio Management", Ch. 14
-- Qian (2005), "Risk Parity Portfolios"
-- AQR (2019), "Constructing Long-Short Equity Portfolios"
+Key improvements:
+- Risk-parity weighting (inverse vol) instead of score-weighted
+- Turnover penalty to reduce unnecessary trading
+- Integration with RiskModel for sector neutrality and vol targeting
 """
 import pandas as pd
 import numpy as np
@@ -35,107 +28,57 @@ class PortfolioConstructor:
         vol_estimates: Optional[pd.Series] = None,
     ) -> pd.Series:
         """
-        Institutional-grade portfolio construction.
-
-        1. Z-score normalize predictions (cross-sectional standardization)
-        2. Select stocks above/below conviction threshold (dynamic sizing)
-        3. Weight by signal strength × inverse volatility
-        4. Enforce dollar neutrality
-        5. Apply constraints (position limits, turnover)
+        Build target portfolio from model predictions.
 
         Args:
             predictions: ticker -> predicted score
             prev_weights: previous period weights (for turnover penalty)
-            vol_estimates: ticker -> annualized volatility
+            vol_estimates: ticker -> annualized volatility (for risk parity)
         """
         predictions = predictions.dropna()
-        if len(predictions) < 20:
+        if len(predictions) < self.cfg.max_positions_long + self.cfg.max_positions_short:
             return pd.Series(dtype=float)
 
-        # Apply turnover penalty: boost held positions to reduce churn
+        # Apply turnover penalty: penalize changing positions
         if prev_weights is not None and self.cfg.turnover_penalty > 0:
             predictions = self._apply_turnover_penalty(predictions, prev_weights)
 
-        # Step 1: Z-score normalize predictions cross-sectionally
-        z_scores = (predictions - predictions.mean()) / (predictions.std() + 1e-8)
+        # Select positions
+        sorted_preds = predictions.sort_values(ascending=False)
+        n_long = min(self.cfg.max_positions_long, len(predictions) // 2)
+        n_short = min(self.cfg.max_positions_short, len(predictions) // 2) if self.cfg.long_short else 0
+        long_tickers = sorted_preds.head(n_long).index.tolist()
+        short_tickers = sorted_preds.tail(n_short).index.tolist() if n_short > 0 else []
 
-        # Step 2: Select positions by percentile (top/bottom 8%)
-        # 8% balances breadth vs conviction: on 430 stocks ≈ 34 per side.
-        # Each position has meaningful signal strength, enough positions
-        # for diversification. Ref: AQR "How to Build a Long-Short Portfolio"
-        long_pct = 0.08
-        short_pct = 0.08
-
-        n_universe = len(predictions)
-        n_long = max(15, int(n_universe * long_pct))
-        n_short = max(15, int(n_universe * short_pct)) if self.cfg.long_short else 0
-
-        # Cap at 40 per side (diminishing marginal alpha beyond this)
-        n_long = min(n_long, 40)
-        n_short = min(n_short, 40)
-
-        sorted_z = z_scores.sort_values(ascending=False)
-        long_mask = z_scores.index.isin(sorted_z.head(n_long).index)
-        short_mask = z_scores.index.isin(sorted_z.tail(n_short).index) if n_short > 0 else pd.Series(False, index=z_scores.index)
-
-        long_tickers = z_scores[long_mask].index.tolist()
-        short_tickers = z_scores[short_mask].index.tolist() if self.cfg.long_short else []
-
-        if not long_tickers:
-            return pd.Series(dtype=float)
-
-        # Step 3: Weight by signal strength × inverse volatility
+        # Compute weights
         weights = pd.Series(0.0, index=predictions.index)
 
-        # Signal-weighted: |z-score| determines conviction
-        long_z = z_scores[long_tickers].abs()
-        short_z = z_scores[short_tickers].abs() if short_tickers else pd.Series(dtype=float)
-
-        # Adjust by inverse volatility if available (signal-risk-parity)
-        if vol_estimates is not None:
-            long_vols = vol_estimates.reindex(long_tickers).fillna(vol_estimates.median())
-            long_vols = long_vols.clip(lower=0.05)
-            long_signal = long_z / long_vols  # high conviction + low vol = large weight
+        if self.cfg.weighting == "risk_parity" and vol_estimates is not None:
+            weights = self._risk_parity_weights(
+                long_tickers, short_tickers, vol_estimates
+            )
+        elif self.cfg.weighting == "equal":
+            weights = self._equal_weights(long_tickers, short_tickers)
         else:
-            long_signal = long_z
+            weights = self._score_weights(
+                long_tickers, short_tickers, predictions
+            )
 
-        if len(long_signal) > 0:
-            weights[long_tickers] = long_signal / long_signal.sum()
+        # Normalize to target leverage
+        weights = self._normalize_leverage(weights)
 
-        if short_tickers:
-            if vol_estimates is not None:
-                short_vols = vol_estimates.reindex(short_tickers).fillna(vol_estimates.median())
-                short_vols = short_vols.clip(lower=0.05)
-                short_signal = short_z / short_vols
-            else:
-                short_signal = short_z
-
-            if len(short_signal) > 0:
-                weights[short_tickers] = -(short_signal / short_signal.sum())
-
-        # Step 4: Enforce dollar neutrality and scale to target leverage
-        weights = self._normalize_dollar_neutral(weights)
-
-        # Step 5: Apply position limits
+        # Apply position limits
         weights = weights.clip(
             lower=-self.cfg.max_position_pct,
             upper=self.cfg.max_position_pct,
         )
-
-        # Re-normalize after clipping to maintain dollar neutrality
-        long_sum = weights[weights > 0].sum()
-        short_sum = weights[weights < 0].abs().sum()
-        if long_sum > 0 and short_sum > 0:
-            avg_side = (long_sum + short_sum) / 2
-            weights[weights > 0] *= avg_side / long_sum
-            weights[weights < 0] *= avg_side / short_sum
 
         # Apply turnover limit
         if prev_weights is not None:
             weights = self._apply_turnover_limit(weights, prev_weights)
 
         # Remove tiny positions
-        weights = weights[weights.abs() > 0.003]
+        weights = weights[weights.abs() > 0.005]
 
         return weights
 
@@ -206,11 +149,7 @@ class PortfolioConstructor:
 
         return weights
 
-    def _normalize_dollar_neutral(self, weights: pd.Series) -> pd.Series:
-        """
-        Enforce strict dollar neutrality: long $ = short $.
-        Scale to target gross leverage (split equally between sides).
-        """
+    def _normalize_leverage(self, weights: pd.Series) -> pd.Series:
         long_sum = weights[weights > 0].sum()
         short_sum = weights[weights < 0].abs().sum()
 
@@ -219,13 +158,25 @@ class PortfolioConstructor:
                 weights[weights > 0] *= 1.0 / long_sum
             return weights
 
-        # Target: half of gross leverage per side (dollar neutral)
-        target_per_side = self.cfg.max_gross_leverage / 2
+        n_long = self.cfg.max_positions_long
+        n_short = self.cfg.max_positions_short
+        total = n_long + n_short
+
+        if total > 0:
+            # Allocate gross leverage proportional to number of positions
+            # e.g., 15L/5S → 75% long, 25% short
+            long_frac = n_long / total
+            short_frac = n_short / total
+            target_long = self.cfg.max_gross_leverage * long_frac
+            target_short = self.cfg.max_gross_leverage * short_frac
+        else:
+            target_long = self.cfg.max_gross_leverage / 2
+            target_short = self.cfg.max_gross_leverage / 2
 
         if long_sum > 0:
-            weights[weights > 0] *= target_per_side / long_sum
+            weights[weights > 0] *= target_long / long_sum
         if short_sum > 0:
-            weights[weights < 0] *= target_per_side / short_sum
+            weights[weights < 0] *= target_short / short_sum
 
         return weights
 

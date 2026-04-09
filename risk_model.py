@@ -29,10 +29,6 @@ class FactorRiskModel:
         self.regime_score: float = 0.0
         self.regime_state = None  # HMM regime state (full probabilities)
 
-        # Portfolio limits (set via set_portfolio_limits from PortfolioConfig)
-        self._max_gross_leverage: float = 1.6
-        self._max_net_leverage: float = 0.10
-
         # Initialize HMM regime detector
         self.hmm_detector = None
         hmm_enabled = getattr(cfg, "hmm_enabled", True)
@@ -304,17 +300,16 @@ class FactorRiskModel:
         return 1.0
 
     def apply_risk_scaling(self, weights, portfolio_returns, sector_map,
-                           n_long: int = 50, n_short: int = 50):
+                           n_long: int = 15, n_short: int = 7):
         """
-        Institutional risk pipeline:
+        Full risk pipeline, used by backtest AND live trading:
         1. Sector neutralization
         2. Factor neutralization
         3. Vol targeting
         4. Drawdown control
-        5. Tail risk protection
-        6. Gross leverage hard cap
-        7. Dollar neutrality enforcement
-        8. Regime overlay
+        5. Tail risk protection (gap-down, vol spike, consecutive losses)
+        6. Re-clip to n_long/n_short (prevents position drift)
+        7. Regime overlay (after clip so it gets full effect)
         """
         weights = self.apply_sector_neutrality(weights, sector_map)
         weights = self.neutralize_factors(weights)
@@ -322,48 +317,24 @@ class FactorRiskModel:
         weights *= self.compute_drawdown_scale()
         weights *= self.compute_tail_risk_scale(portfolio_returns)
 
-        # Remove tiny positions
-        weights = weights[weights.abs() > 0.003]
+        # Re-clip positions (factor/sector neutralization can expand beyond target)
+        if len(weights[weights > 0]) > n_long:
+            long_w = weights[weights > 0].nlargest(n_long)
+        else:
+            long_w = weights[weights > 0]
 
-        # Hard cap on gross leverage (prevents leverage explosion)
-        # Uses PortfolioConfig values passed via set_portfolio_limits()
-        gross = weights.abs().sum()
-        max_gross = self._max_gross_leverage
-        if gross > max_gross:
-            weights *= max_gross / gross
+        if n_short > 0 and len(weights[weights < 0]) > n_short:
+            short_w = weights[weights < 0].nsmallest(n_short)
+        else:
+            short_w = weights[weights < 0]
 
-        # Enforce dollar neutrality + net exposure cap
-        # Risk adjustments (vol, drawdown, tail) can break the balance
-        long_sum = weights[weights > 0].sum()
-        short_sum = weights[weights < 0].abs().sum()
-        if long_sum > 0 and short_sum > 0:
-            # Scale both sides to equal dollar value (strict dollar neutral)
-            target_per_side = min(long_sum, short_sum)
-            target_per_side = min(target_per_side, max_gross / 2)
-            weights[weights > 0] *= target_per_side / long_sum
-            weights[weights < 0] *= target_per_side / short_sum
+        weights = pd.concat([long_w, short_w])
+        weights = weights[weights.abs() > 0.005]
 
-            # Hard cap on net exposure
-            net = weights.sum()
-            max_net = self._max_net_leverage
-            if abs(net) > max_net:
-                # Reduce the larger side to bring net within limit
-                if net > 0:
-                    excess = net - max_net
-                    weights[weights > 0] *= (long_sum - excess) / long_sum
-                else:
-                    excess = abs(net) - max_net
-                    weights[weights < 0] *= (short_sum - excess) / short_sum
-
-        # Regime overlay (after neutrality — scales weights, doesn't add positions)
+        # Regime overlay (after clip — scales weights, doesn't add positions)
         weights = self.apply_regime_overlay(weights)
 
         return weights
-
-    def set_portfolio_limits(self, max_gross: float, max_net: float):
-        """Set portfolio limits from PortfolioConfig (called by model_comparison)."""
-        self._max_gross_leverage = max_gross
-        self._max_net_leverage = max_net
 
     def reset(self):
         self.cum_returns = []
