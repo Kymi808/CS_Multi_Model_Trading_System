@@ -79,7 +79,7 @@ class EnsembleRanker:
             date_counts = X_train.index.get_level_values(0).value_counts().sort_index()
             train_groups = date_counts.values.tolist()
         else:
-            train_groups = [len(X_train)]  # single group fallback
+            train_groups = [len(X_train)]
 
         if X_val is not None and isinstance(X_val.index, pd.MultiIndex):
             val_date_counts = X_val.index.get_level_values(0).value_counts().sort_index()
@@ -87,11 +87,34 @@ class EnsembleRanker:
         else:
             val_groups = [len(X_val)] if X_val is not None else None
 
+        # Convert continuous targets to integer relevance labels (0-4)
+        # LambdaRank requires discrete labels. We bin returns into quintiles
+        # per date so the model learns to rank within each cross-section.
+        def _to_relevance(y, index):
+            """Convert continuous returns to 0-4 relevance labels per date."""
+            if isinstance(index, pd.MultiIndex):
+                dates = index.get_level_values(0)
+                labels = pd.Series(0, index=index)
+                for date in dates.unique():
+                    mask = dates == date
+                    vals = y[mask]
+                    if len(vals) < 5:
+                        labels[mask] = 2  # neutral if too few
+                        continue
+                    # Quintile binning: 0=worst 20%, 4=best 20%
+                    labels[mask] = pd.qcut(vals, 5, labels=False, duplicates='drop')
+                return labels.values.astype(int)
+            else:
+                return pd.qcut(y, 5, labels=False, duplicates='drop').astype(int)
+
+        y_train_rank = _to_relevance(y_train, X_train.index)
+        y_val_rank = _to_relevance(y_val, X_val.index) if X_val is not None and len(X_val) > 0 else None
+
         for i, seed in enumerate(self.cfg.ensemble_seeds[:self.cfg.n_ensemble]):
             params = self._get_lgb_params(seed)
             params["objective"] = "lambdarank"
             params["metric"] = "ndcg"
-            params["ndcg_eval_at"] = [10, 20]  # optimize ranking quality at top/bottom 10-20
+            params["label_gain"] = [0, 1, 2, 3, 4]  # gain for each relevance level
 
             model = lgb.LGBMRanker(**params)
             callbacks = [lgb.log_evaluation(period=0)]
@@ -100,14 +123,14 @@ class EnsembleRanker:
             if sample_weight is not None:
                 fit_kwargs["sample_weight"] = sample_weight
 
-            if X_val is not None and y_val is not None:
+            if X_val is not None and y_val_rank is not None:
                 callbacks.append(lgb.early_stopping(self.cfg.early_stopping_rounds, verbose=False))
-                model.fit(X_train, y_train, group=train_groups,
-                          eval_set=[(X_val, y_val)], eval_group=[val_groups],
+                model.fit(X_train, y_train_rank, group=train_groups,
+                          eval_set=[(X_val, y_val_rank)], eval_group=[val_groups],
                           eval_metric="ndcg", eval_at=[10, 20],
                           callbacks=callbacks, **fit_kwargs)
             else:
-                model.fit(X_train, y_train, group=train_groups,
+                model.fit(X_train, y_train_rank, group=train_groups,
                           callbacks=callbacks, **fit_kwargs)
 
             self.models.append(model)
