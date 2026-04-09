@@ -130,9 +130,9 @@ class CrossMambaConfig:
 class ComparisonConfig:
     """Configuration for multi-model comparison."""
     models_to_run: List[str] = field(default_factory=lambda: [
-        "lightgbm", "tst", "crossmamba",
+        "lightgbm",
     ])
-    run_ensemble: bool = True
+    run_ensemble: bool = False
     ensemble_weights: Dict[str, float] = field(default_factory=lambda: {
         "lightgbm": 0.34, "tst": 0.33, "crossmamba": 0.33,
     })
