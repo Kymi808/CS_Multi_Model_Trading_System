@@ -64,6 +64,7 @@ def run_single_model_pipeline(
 
     # Risk model
     risk = FactorRiskModel(cfg.risk)
+    risk.set_portfolio_limits(cfg.portfolio.max_gross_leverage, cfg.portfolio.max_net_leverage)
     if len(prices) > 252:
         _fund = fundamentals
         if fmp_historical:
@@ -345,6 +346,7 @@ def run_comparison(
         if not ensemble_preds.empty:
             # Run ensemble through portfolio pipeline
             risk = FactorRiskModel(cfg.risk)
+            risk.set_portfolio_limits(cfg.portfolio.max_gross_leverage, cfg.portfolio.max_net_leverage)
             if len(prices) > 252:
                 _fund = fundamentals
                 if fmp_historical:

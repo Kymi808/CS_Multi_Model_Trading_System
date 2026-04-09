@@ -29,6 +29,10 @@ class FactorRiskModel:
         self.regime_score: float = 0.0
         self.regime_state = None  # HMM regime state (full probabilities)
 
+        # Portfolio limits (set via set_portfolio_limits from PortfolioConfig)
+        self._max_gross_leverage: float = 1.6
+        self._max_net_leverage: float = 0.10
+
         # Initialize HMM regime detector
         self.hmm_detector = None
         hmm_enabled = getattr(cfg, "hmm_enabled", True)
@@ -322,30 +326,44 @@ class FactorRiskModel:
         weights = weights[weights.abs() > 0.003]
 
         # Hard cap on gross leverage (prevents leverage explosion)
-        # Standard stat-arb: 1.6x gross = 0.8x per side
+        # Uses PortfolioConfig values passed via set_portfolio_limits()
         gross = weights.abs().sum()
-        max_gross = getattr(self.cfg, 'max_gross_leverage', 1.6)
-        if hasattr(self, '_portfolio_cfg_max_gross'):
-            max_gross = self._portfolio_cfg_max_gross
+        max_gross = self._max_gross_leverage
         if gross > max_gross:
             weights *= max_gross / gross
 
-        # Re-enforce dollar neutrality after risk scaling
+        # Enforce dollar neutrality + net exposure cap
         # Risk adjustments (vol, drawdown, tail) can break the balance
         long_sum = weights[weights > 0].sum()
         short_sum = weights[weights < 0].abs().sum()
         if long_sum > 0 and short_sum > 0:
-            # Scale both sides to equal dollar value
+            # Scale both sides to equal dollar value (strict dollar neutral)
             target_per_side = min(long_sum, short_sum)
-            # Cap at half of max gross leverage
             target_per_side = min(target_per_side, max_gross / 2)
             weights[weights > 0] *= target_per_side / long_sum
             weights[weights < 0] *= target_per_side / short_sum
+
+            # Hard cap on net exposure
+            net = weights.sum()
+            max_net = self._max_net_leverage
+            if abs(net) > max_net:
+                # Reduce the larger side to bring net within limit
+                if net > 0:
+                    excess = net - max_net
+                    weights[weights > 0] *= (long_sum - excess) / long_sum
+                else:
+                    excess = abs(net) - max_net
+                    weights[weights < 0] *= (short_sum - excess) / short_sum
 
         # Regime overlay (after neutrality — scales weights, doesn't add positions)
         weights = self.apply_regime_overlay(weights)
 
         return weights
+
+    def set_portfolio_limits(self, max_gross: float, max_net: float):
+        """Set portfolio limits from PortfolioConfig (called by model_comparison)."""
+        self._max_gross_leverage = max_gross
+        self._max_net_leverage = max_net
 
     def reset(self):
         self.cum_returns = []

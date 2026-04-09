@@ -59,20 +59,20 @@ class PortfolioConstructor:
         # Step 1: Z-score normalize predictions cross-sectionally
         z_scores = (predictions - predictions.mean()) / (predictions.std() + 1e-8)
 
-        # Step 2: Select positions by percentile (top/bottom 15%)
-        # Percentile-based is robust to any prediction distribution —
-        # works for tightly-clustered LightGBM and wide-spread neural nets alike.
-        # 15% per side on 400 stocks ≈ 60 positions per side → high breadth
-        long_pct = 0.15   # top 15%
-        short_pct = 0.15  # bottom 15%
+        # Step 2: Select positions by percentile (top/bottom 8%)
+        # 8% balances breadth vs conviction: on 430 stocks ≈ 34 per side.
+        # Each position has meaningful signal strength, enough positions
+        # for diversification. Ref: AQR "How to Build a Long-Short Portfolio"
+        long_pct = 0.08
+        short_pct = 0.08
 
         n_universe = len(predictions)
         n_long = max(15, int(n_universe * long_pct))
         n_short = max(15, int(n_universe * short_pct)) if self.cfg.long_short else 0
 
-        # Cap at 50 per side
-        n_long = min(n_long, 50)
-        n_short = min(n_short, 50)
+        # Cap at 40 per side (diminishing marginal alpha beyond this)
+        n_long = min(n_long, 40)
+        n_short = min(n_short, 40)
 
         sorted_z = z_scores.sort_values(ascending=False)
         long_mask = z_scores.index.isin(sorted_z.head(n_long).index)
