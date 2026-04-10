@@ -161,7 +161,7 @@ class EnsembleRanker:
 
 def walk_forward_train(
     X: pd.DataFrame, y: pd.Series, cfg: ModelConfig, feature_cfg: FeatureConfig,
-    model_type: str = "lightgbm", model_cfg=None,
+    model_type: str = "lightgbm", model_cfg=None, max_features: int = 0,
 ) -> Tuple[list, pd.Series, pd.DataFrame]:
     """
     Walk-forward training with purge/embargo gap.
@@ -169,6 +169,8 @@ def walk_forward_train(
     Args:
         model_type: "lightgbm", "tst", or "crossmamba"
         model_cfg: Config object for the chosen model type (uses cfg for lightgbm)
+        max_features: if > 0, run per-window feature selection on training data only
+                      (eliminates look-ahead bias from global feature selection)
     """
     if isinstance(X.index, pd.MultiIndex):
         dates = sorted(X.index.get_level_values(0).unique())
@@ -232,11 +234,23 @@ def walk_forward_train(
         if len(X_tr) < 100 or len(X_p) == 0:
             continue
 
+        # Per-window feature selection (training data only — no look-ahead)
+        if max_features > 0:
+            from backtest import select_features_by_ic
+            window_features = select_features_by_ic(
+                X_tr, y_tr, max_features=max_features, n_splits=2,
+            )
+            X_tr = X_tr[window_features]
+            if len(X_v) > 0:
+                X_v = X_v[window_features]
+            X_p = X_p[window_features]
+
         window_num = len(models) + 1
         logger.info(
             f"[{model_type.upper()}] Window {window_num}: "
             f"Train {train_dates[0].date()}→{train_dates[-1].date()} ({len(X_tr)}), "
             f"Predict {pred_dates[0].date()}→{pred_dates[-1].date()}"
+            f"{f' ({len(window_features)} feats)' if max_features > 0 else ''}"
         )
 
         model = create_model(model_type, effective_cfg)

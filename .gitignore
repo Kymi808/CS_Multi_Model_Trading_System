@@ -2,7 +2,18 @@
 /.venv
 /.vscode
 __pycache__/
-/data
+/data/*
 /logs
 *.key
 *.pptx
+.env
+
+# Keep cache files for Colab runs (historical market data — reproducible from FMP)
+!/data/prices_586.csv
+!/data/volumes_586.csv
+!/data/cross_asset.csv
+!/data/sectors.json
+!/data/earnings_dates.json
+!/data/sp500_pit_constituents.json
+!/data/fmp_historical_quarterly.json
+!/data/fmp_fundamentals_hist.json

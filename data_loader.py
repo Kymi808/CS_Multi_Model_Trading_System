@@ -235,6 +235,68 @@ def _generate_synthetic_sentiment(
     return sentiment
 
 
+def _fetch_prices_fmp(
+    tickers: List[str], fmp_key: str, start_date: str, end_date: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Fetch historical prices from FMP for all tickers (including delisted).
+    Uses the light endpoint (close + volume only) for speed.
+    """
+    import httpx
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    price_data = {}
+    volume_data = {}
+    errors = 0
+
+    def _fetch_one(ticker: str):
+        _time.sleep(0.15)
+        try:
+            resp = httpx.get(
+                "https://financialmodelingprep.com/stable/historical-price-eod/light",
+                params={"apikey": fmp_key, "symbol": ticker, "from": start_date, "to": end_date},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                records = resp.json()
+                if isinstance(records, list) and records:
+                    return ticker, records
+        except Exception:
+            pass
+        return ticker, None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_fetch_one, t): t for t in tickers}
+        for i, future in enumerate(as_completed(futures)):
+            ticker, records = future.result()
+            if (i + 1) % 50 == 0:
+                logger.info(f"  FMP prices: {i + 1}/{len(tickers)} "
+                            f"({len(price_data)} OK, {errors} errors)")
+            if records:
+                for rec in records:
+                    date = rec.get("date")
+                    if date:
+                        price_data.setdefault(date, {})[ticker] = rec.get("price")
+                        volume_data.setdefault(date, {})[ticker] = rec.get("volume", 0)
+            else:
+                errors += 1
+
+    logger.info(f"FMP prices: {len(price_data)} dates, "
+                f"{len(set().union(*(d.keys() for d in price_data.values())) if price_data else set())} tickers "
+                f"({errors} errors)")
+
+    if not price_data:
+        return pd.DataFrame(), pd.DataFrame()
+
+    prices = pd.DataFrame.from_dict(price_data, orient="index").sort_index()
+    volumes = pd.DataFrame.from_dict(volume_data, orient="index").sort_index()
+    prices.index = pd.to_datetime(prices.index)
+    volumes.index = pd.to_datetime(volumes.index)
+
+    return prices, volumes
+
+
 def fetch_price_data(
     tickers: List[str], cfg, end_date: Optional[str] = None, cache_dir: str = "data",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -252,7 +314,25 @@ def fetch_price_data(
         return pd.read_csv(cache_px, index_col=0, parse_dates=True), \
                pd.read_csv(cache_vol, index_col=0, parse_dates=True)
 
-    logger.info(f"Downloading {len(tickers)} tickers: {start_date} to {end_date}")
+    # Primary: FMP (institutional-grade, includes delisted securities)
+    fmp_key = os.environ.get("FMP_API_KEY", "")
+    prices, volumes = pd.DataFrame(), pd.DataFrame()
+
+    if fmp_key:
+        logger.info(f"Downloading {len(tickers)} tickers from FMP: {start_date} to {end_date}")
+        prices, volumes = _fetch_prices_fmp(tickers, fmp_key, start_date, end_date)
+
+    # Check if FMP got enough data
+    if len(prices) > 100 and len(prices.columns) > len(tickers) * 0.5:
+        prices = prices.ffill(limit=3)
+        volumes = volumes.ffill(limit=3)
+        prices.to_csv(cache_px)
+        volumes.to_csv(cache_vol)
+        logger.info(f"Cached: {prices.shape}")
+        return prices, volumes
+
+    # Fallback: yfinance (for when FMP key is unavailable)
+    logger.info(f"FMP insufficient, falling back to yfinance for {len(tickers)} tickers")
     all_prices, all_volumes = [], []
     try:
         import yfinance as yf
@@ -271,12 +351,11 @@ def fetch_price_data(
             except Exception as e:
                 logger.warning(f"  Batch failed: {e}")
     except Exception as e:
-        logger.warning(f"yfinance import or download failed: {e}")
+        logger.warning(f"yfinance failed: {e}")
 
     if all_prices:
         prices = pd.concat(all_prices, axis=1).loc[:, ~pd.concat(all_prices, axis=1).columns.duplicated()]
         volumes = pd.concat(all_volumes, axis=1).loc[:, ~pd.concat(all_volumes, axis=1).columns.duplicated()]
-        # Check if we got actual data (not empty frames)
         if len(prices.dropna(how="all")) > 100:
             prices = prices.ffill(limit=3)
             volumes = volumes.ffill(limit=3)
@@ -438,7 +517,7 @@ def _fetch_earnings_dates_fmp(
             return None
 
     earnings = {}
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         future_to_ticker = {pool.submit(_fetch_one, t): t for t in tickers}
         for i, future in enumerate(as_completed(future_to_ticker)):
             ticker = future_to_ticker[future]
@@ -470,9 +549,10 @@ def fetch_earnings_dates(
     if fmp_key and fmp_key not in ("", "xxxxx"):
         earnings = _fetch_earnings_dates_fmp(tickers, fmp_key)
 
-    # Fallback to yfinance for tickers FMP missed
+    # Fallback to yfinance only if FMP got almost nothing
+    # (yfinance scrapes Yahoo HTML per ticker — extremely slow)
     missing = [t for t in tickers if t not in earnings]
-    if missing and len(missing) > len(tickers) * 0.5:
+    if missing and len(earnings) < len(tickers) * 0.1:
         logger.info(f"FMP covered {len(earnings)} tickers, fetching {len(missing)} from yfinance...")
         try:
             import yfinance as yf

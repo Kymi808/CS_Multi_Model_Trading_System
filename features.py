@@ -138,6 +138,221 @@ def advanced_features(prices: pd.DataFrame, volumes: pd.DataFrame, cfg: FeatureC
     return feats
 
 
+def short_term_reversal_features(prices: pd.DataFrame, volumes: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Short-term reversal signals (Jegadeesh 1990, Lo & MacKinlay 1990).
+
+    1-5 day mean reversion is one of the most robust cross-sectional alphas.
+    Stocks that dropped sharply tend to bounce; stocks that spiked tend to fade.
+    """
+    feats = {}
+    lr = _log_returns(prices)
+
+    # Raw short-term reversal: negative of recent return
+    for w in [1, 2, 3, 5]:
+        rev = -lr.rolling(w).sum()
+        feats[f"reversal_{w}d"] = rev
+        feats[f"cs_reversal_{w}d"] = rev.rank(axis=1, pct=True)
+
+    # Overnight gap proxy: open approximated by today's close vs yesterday's close
+    # (We don't have intraday data, so use 1d return as proxy)
+    gap = lr  # 1-day log return
+    feats["overnight_gap"] = gap
+    feats["cs_overnight_gap"] = gap.rank(axis=1, pct=True)
+
+    # Volume-weighted reversal: reversal is stronger on high volume
+    # (Informed selling creates bigger mean-reversion opportunity)
+    vol_rank = volumes.rank(axis=1, pct=True)
+    rev_3d = -lr.rolling(3).sum()
+    feats["vol_weighted_reversal"] = rev_3d * vol_rank
+    feats["cs_vol_weighted_reversal"] = feats["vol_weighted_reversal"].rank(axis=1, pct=True)
+
+    return feats
+
+
+def sector_relative_features(
+    prices: pd.DataFrame, sector_map: Dict[str, str],
+) -> Dict[str, pd.DataFrame]:
+    """
+    Sector-relative momentum (Moskowitz & Grinblatt 1999).
+
+    Stock momentum relative to its sector captures stock-specific alpha
+    after removing sector rotation effects. A stock rising because its
+    whole sector is rising is NOT the same as a stock outperforming peers.
+    """
+    feats = {}
+    lr = _log_returns(prices)
+
+    if not sector_map:
+        return feats
+
+    sector_series = pd.Series({t: sector_map.get(t, "Unknown") for t in prices.columns})
+
+    for w in [5, 21, 63]:
+        stock_mom = lr.rolling(w).sum()
+        # Compute sector average momentum
+        sector_avg = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
+        for sector in sector_series.unique():
+            members = sector_series[sector_series == sector].index
+            cols = [c for c in members if c in stock_mom.columns]
+            if len(cols) > 1:
+                avg = stock_mom[cols].mean(axis=1)
+                for c in cols:
+                    sector_avg[c] = avg
+
+        rel_mom = stock_mom - sector_avg
+        feats[f"sector_rel_mom_{w}d"] = rel_mom
+        feats[f"cs_sector_rel_mom_{w}d"] = rel_mom.rank(axis=1, pct=True)
+
+    # Sector-relative volume: is this stock seeing unusual volume vs peers?
+    return feats
+
+
+def factor_momentum_features(prices: pd.DataFrame, cfg: FeatureConfig) -> Dict[str, pd.DataFrame]:
+    """
+    Factor momentum (Ehsani & Linnainmaa 2022).
+
+    Momentum of factor returns themselves: if 'value' is working this month,
+    continue tilting toward value. Captures regime persistence in factor returns.
+    """
+    feats = {}
+    lr = _log_returns(prices)
+
+    # Build simple factor portfolios from cross-sectional sorts
+    # Size: small minus big (by market cap proxy — use vol as proxy)
+    # Value: high-to-low by inverse price level (crude proxy)
+    # Momentum: winner minus loser
+
+    for w in [21, 63]:
+        # Momentum factor: top quintile minus bottom quintile
+        rolling_mom = lr.rolling(w).sum()
+        mom_rank = rolling_mom.rank(axis=1, pct=True)
+        long_mom = lr[mom_rank > 0.8].mean(axis=1)
+        short_mom = lr[mom_rank < 0.2].mean(axis=1)
+        factor_ret = (long_mom - short_mom).fillna(0)
+
+        # Factor momentum: is the factor itself trending?
+        for lookback in [5, 21]:
+            fm = factor_ret.rolling(lookback).sum()
+            # Broadcast to all stocks (market-wide signal)
+            label = f"factor_mom_{w}d_lb{lookback}"
+            feats[label] = pd.DataFrame(
+                np.tile(fm.values.reshape(-1, 1), (1, len(prices.columns))),
+                index=prices.index, columns=prices.columns,
+            )
+
+    # Reversal factor: short-term reversal portfolio performance
+    rev_1d = -lr
+    rev_rank = rev_1d.rank(axis=1, pct=True)
+    long_rev = lr[rev_rank > 0.8].mean(axis=1)
+    short_rev = lr[rev_rank < 0.2].mean(axis=1)
+    rev_factor = (long_rev - short_rev).fillna(0)
+    for lookback in [5, 21]:
+        fm = rev_factor.rolling(lookback).sum()
+        label = f"reversal_factor_lb{lookback}"
+        feats[label] = pd.DataFrame(
+            np.tile(fm.values.reshape(-1, 1), (1, len(prices.columns))),
+            index=prices.index, columns=prices.columns,
+        )
+
+    return feats
+
+
+def calendar_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Calendar/seasonality effects (Ariel 1987, Lakonishok & Smidt 1988).
+
+    Turn-of-month effect: stocks tend to rise in last/first 3 days of month.
+    Day-of-week: Monday effect (lower returns), Friday effect.
+    Month-end rebalancing: institutional flows create predictable patterns.
+    """
+    feats = {}
+    dates = prices.index
+    n_cols = len(prices.columns)
+
+    # Day of week (0=Mon, 4=Fri)
+    dow = dates.dayofweek.values.astype(float)
+    # Encode as sin/cos for cyclical nature
+    dow_sin = np.sin(2 * np.pi * dow / 5)
+    dow_cos = np.cos(2 * np.pi * dow / 5)
+    feats["day_of_week_sin"] = pd.DataFrame(
+        np.tile(dow_sin.reshape(-1, 1), (1, n_cols)),
+        index=dates, columns=prices.columns,
+    )
+    feats["day_of_week_cos"] = pd.DataFrame(
+        np.tile(dow_cos.reshape(-1, 1), (1, n_cols)),
+        index=dates, columns=prices.columns,
+    )
+
+    # Turn of month: days from month boundary (-3 to +3 centered on month end/start)
+    dom = dates.day.values.astype(float)
+    days_in_month = dates.to_series().dt.days_in_month.values.astype(float)
+    # Distance to nearest month boundary (end or start)
+    dist_to_end = days_in_month - dom
+    dist_to_start = dom - 1
+    near_boundary = np.minimum(dist_to_end, dist_to_start)
+    turn_of_month = np.exp(-near_boundary / 2.0)  # peaks at month boundary
+    feats["turn_of_month"] = pd.DataFrame(
+        np.tile(turn_of_month.reshape(-1, 1), (1, n_cols)),
+        index=dates, columns=prices.columns,
+    )
+
+    # Month of year (cyclical encoding for January effect, etc.)
+    month = dates.month.values.astype(float)
+    feats["month_sin"] = pd.DataFrame(
+        np.tile(np.sin(2 * np.pi * month / 12).reshape(-1, 1), (1, n_cols)),
+        index=dates, columns=prices.columns,
+    )
+    feats["month_cos"] = pd.DataFrame(
+        np.tile(np.cos(2 * np.pi * month / 12).reshape(-1, 1), (1, n_cols)),
+        index=dates, columns=prices.columns,
+    )
+
+    # Options expiration week (3rd Friday of month — high gamma, pinning effects)
+    # Approximate: day 15-21 and Friday
+    is_opex_week = ((dom >= 15) & (dom <= 21)).astype(float)
+    feats["opex_week"] = pd.DataFrame(
+        np.tile(is_opex_week.reshape(-1, 1), (1, n_cols)),
+        index=dates, columns=prices.columns,
+    )
+
+    return feats
+
+
+def idiosyncratic_vol_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Idiosyncratic volatility (Ang, Hodrick, Xing & Zhang 2006).
+
+    Residual vol after removing market beta — stocks with low idio vol
+    tend to outperform (low-vol anomaly). High idio vol = lottery ticket demand.
+    Vectorized: rolling covariance via rolling sums (no per-cell lambda).
+    """
+    feats = {}
+    lr = _log_returns(prices)
+    mkt = lr.mean(axis=1)  # equal-weighted market return
+
+    for w in [21, 63]:
+        # Vectorized rolling beta: cov(stock, mkt) / var(mkt)
+        # cov = E[XY] - E[X]E[Y], computed via rolling sums
+        mkt_vals = mkt.values.reshape(-1, 1)
+        xy = lr.multiply(mkt, axis=0)
+        roll_xy = xy.rolling(w).mean()
+        roll_x = lr.rolling(w).mean()
+        roll_y = mkt.rolling(w).mean().values.reshape(-1, 1)
+        roll_cov = roll_xy - roll_x * roll_y
+        roll_var = mkt.rolling(w).var().values.reshape(-1, 1)
+        beta = roll_cov / (roll_var + 1e-8)
+
+        # Residual = stock return - beta * market return
+        residual = lr - beta * mkt_vals
+        idio_vol = residual.rolling(w).std() * np.sqrt(252)
+
+        feats[f"idio_vol_{w}d"] = idio_vol
+        feats[f"cs_idio_vol_{w}d"] = idio_vol.rank(axis=1, pct=True)
+
+    return feats
+
+
 def technical_features(prices: pd.DataFrame, cfg: FeatureConfig) -> Dict[str, pd.DataFrame]:
     feats = {}
     close = prices
@@ -200,7 +415,7 @@ def compute_targets(
         # Risk-adjusted target: forward return / trailing volatility
         # Grinold & Kahn: predicting risk-adjusted returns is more stable
         trailing_vol = lr.rolling(63).std() * np.sqrt(252)
-        trailing_vol = trailing_vol.replace(0, np.nan).fillna(method="ffill")
+        trailing_vol = trailing_vol.replace(0, np.nan).ffill()
         risk_adj = fwd / (trailing_vol + 1e-8)
         targets[f"fwd_risk_adj_{h}d"] = risk_adj.rank(axis=1, pct=True)
 
@@ -250,6 +465,11 @@ def build_all_features(
     pv_feats.update(volume_features(prices, volumes, cfg))
     pv_feats.update(technical_features(prices, cfg))
     pv_feats.update(advanced_features(prices, volumes, cfg))
+    pv_feats.update(short_term_reversal_features(prices, volumes))
+    pv_feats.update(sector_relative_features(prices, sector_map or {}))
+    pv_feats.update(factor_momentum_features(prices, cfg))
+    pv_feats.update(calendar_features(prices))
+    pv_feats.update(idiosyncratic_vol_features(prices))
 
     # Cross-sectional ranks of price/volume features
     cs_feats = cross_sectional_ranks(pv_feats)

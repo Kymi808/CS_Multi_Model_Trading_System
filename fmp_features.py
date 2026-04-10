@@ -37,11 +37,12 @@ FMP_BASE = "https://financialmodelingprep.com/stable"
 
 
 def _fmp_get(endpoint: str, api_key: str, params: dict = None, timeout: float = 10.0):
-    """Make a single FMP /stable/ API call."""
-    import httpx
+    """Make a single FMP /stable/ API call with rate-limit pause."""
+    import httpx, time
     if params is None:
         params = {}
     params["apikey"] = api_key
+    time.sleep(0.15)  # ~6 req/s to stay well under 750/min
     return httpx.get(f"{FMP_BASE}/{endpoint}", params=params, timeout=timeout)
 
 
@@ -201,7 +202,7 @@ def fetch_fmp_fundamental_data(
         return fund if fund else None
 
     # Fetch all tickers concurrently (15 threads, each does 3-4 API calls)
-    MAX_WORKERS = 8
+    MAX_WORKERS = 3
     fundamentals = {}
     errors = 0
 
@@ -262,18 +263,26 @@ def fetch_fmp_historical_fundamentals(
 
     cache_file = os.path.join(cache_dir, "fmp_historical_quarterly.json")
 
+    cached_data = {}
     if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
-                cached = json.load(f)
-            if cached.get("_date") == datetime.now().strftime("%Y-%m-%d"):
-                logger.info("Loading cached FMP historical fundamentals")
-                return {k: v for k, v in cached.items() if k != "_date"}
+                cached_data = json.load(f)
+            # Date-agnostic: historical fundamentals don't change, always use cache if present
+            cached_tickers = {k for k in cached_data.keys() if not k.startswith("_")}
+            if cached_tickers:
+                missing = [t for t in tickers if t not in cached_tickers]
+                if not missing:
+                    logger.info(f"Loading cached FMP historical fundamentals ({len(cached_tickers)} tickers)")
+                    return {k: v for k, v in cached_data.items() if not k.startswith("_")}
+                else:
+                    logger.info(f"Cache has {len(cached_tickers)} tickers, fetching {len(missing)} missing...")
+                    tickers = missing  # only fetch the missing ones
         except Exception:
-            pass
+            cached_data = {}
 
     if not api_key or api_key in ("", "xxxxx"):
-        return {}
+        return {k: v for k, v in cached_data.items() if k != "_date"}
 
     def _fetch_one_historical(ticker: str) -> Optional[List[dict]]:
         """Fetch all historical quarterly data for one ticker (4 API calls)."""
@@ -352,7 +361,7 @@ def fetch_fmp_historical_fundamentals(
 
     # Fetch concurrently (5 threads — each does 4 API calls = ~20 concurrent)
     # Conservative to stay under 750 req/min FMP Premium limit
-    MAX_WORKERS = 5
+    MAX_WORKERS = 3
     all_data = {}
     errors = 0
 
@@ -375,16 +384,22 @@ def fetch_fmp_historical_fundamentals(
                     pool.shutdown(wait=False, cancel_futures=True)
                     break
 
-    if all_data:
+    # Merge newly fetched data with existing cache (incremental cache)
+    merged = {k: v for k, v in cached_data.items() if not k.startswith("_")}
+    merged.update(all_data)
+
+    if merged:
         os.makedirs(cache_dir, exist_ok=True)
-        to_cache = dict(all_data)
+        to_cache = dict(merged)
         to_cache["_date"] = datetime.now().strftime("%Y-%m-%d")
         with open(cache_file, "w") as f:
             json.dump(to_cache, f)
 
-    logger.info(f"FMP historical: {len(all_data)}/{len(tickers)} tickers, "
+    logger.info(f"FMP historical: {len(merged)} total tickers in cache "
+                f"({len(all_data)} new, {len(merged) - len(all_data)} from cache), "
                 f"~{n_quarters} quarters each")
-    return all_data
+
+    return merged
 
 
 def get_pit_fundamentals(
@@ -444,9 +459,11 @@ def fetch_fmp_fundamentals(
         try:
             with open(cache_file) as f:
                 cached = json.load(f)
-            if cached.get("_date") == datetime.now().strftime("%Y-%m-%d"):
-                logger.info("Loading cached FMP alpha features")
-                return {k: v for k, v in cached.items() if k != "_date"}
+            # Date-agnostic: earnings surprises are historical, always use cache
+            non_meta = {k: v for k, v in cached.items() if not k.startswith("_")}
+            if non_meta:
+                logger.info(f"Loading cached FMP alpha features ({len(non_meta)} tickers)")
+                return non_meta
         except Exception:
             pass
 

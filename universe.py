@@ -1,17 +1,15 @@
 """
 Universe selection with sector classification.
 
-NOTE on survivorship bias:
-This module uses CURRENT S&P 500 constituents for historical backtests.
-Stocks that were delisted or removed from the index are excluded, which
-inflates backtest returns by an estimated 1-3%. Production systems should
-use point-in-time constituent lists from a data vendor (e.g., Compustat,
-Sharadar, or similar).
+Point-in-time S&P 500 constituents via FMP historical data.
+Eliminates survivorship bias by including stocks that were later
+delisted, acquired, or removed from the index (e.g., SIVB, FRC, TWTR).
 """
 import pandas as pd
 import logging
 import json
 import os
+import time
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -86,9 +84,10 @@ def _get_tickers_from_alpaca() -> List[str]:
         max_universe = 500
         known = set(_fallback_tickers())
 
-        # Priority: known large-caps first, then remaining Alpaca assets
-        prioritized = [t for t in tickers if t in known]
-        remaining = [t for t in tickers if t not in known]
+        # Priority: known large-caps first (curated liquid names),
+        # then remaining sorted alphabetically for determinism
+        prioritized = [t for t in _fallback_tickers() if t in set(tickers)]
+        remaining = sorted([t for t in tickers if t not in known])
         combined = prioritized + remaining
 
         result = combined[:max_universe]
@@ -201,9 +200,152 @@ def filter_universe_by_liquidity(
     return filtered
 
 
+def get_pit_sp500_constituents(
+    start_date: str, end_date: str, fmp_api_key: str = "", cache_dir: str = "data",
+) -> Dict[str, List[str]]:
+    """
+    Reconstruct point-in-time S&P 500 membership for any date range.
+
+    Walks backward from current constituents through FMP's historical
+    add/remove events. Returns {date_str: [tickers]} for monthly snapshots.
+
+    This eliminates survivorship bias by including stocks like SIVB, FRC,
+    TWTR, ATVI that were in the index during the backtest period but later
+    removed/delisted.
+    """
+    cache_file = os.path.join(cache_dir, "sp500_pit_constituents.json")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                cached = json.load(f)
+            if cached.get("_start") == start_date and cached.get("_end") == end_date:
+                logger.info(f"Loading cached PIT constituents ({len(cached) - 2} snapshots)")
+                return {k: v for k, v in cached.items() if not k.startswith("_")}
+        except Exception:
+            pass
+
+    if not fmp_api_key:
+        fmp_api_key = os.environ.get("FMP_API_KEY", "")
+    if not fmp_api_key:
+        return {}
+
+    import httpx
+
+    # 1. Fetch current constituents
+    time.sleep(0.15)
+    resp = httpx.get(
+        "https://financialmodelingprep.com/stable/sp500-constituent",
+        params={"apikey": fmp_api_key}, timeout=15,
+    )
+    if resp.status_code != 200:
+        logger.warning(f"FMP current constituents failed: {resp.status_code}")
+        return {}
+    current = {item["symbol"] for item in resp.json() if item.get("symbol")}
+    logger.info(f"Current S&P 500: {len(current)} members")
+
+    # 2. Fetch historical changes
+    time.sleep(0.15)
+    resp = httpx.get(
+        "https://financialmodelingprep.com/stable/historical-sp500-constituent",
+        params={"apikey": fmp_api_key}, timeout=15,
+    )
+    if resp.status_code != 200:
+        logger.warning(f"FMP historical constituents failed: {resp.status_code}")
+        return {}
+    changes = resp.json()
+    logger.info(f"Historical S&P 500 changes: {len(changes)} events")
+
+    # Sort changes newest-first for backward reconstruction
+    changes = sorted(changes, key=lambda x: x.get("date", ""), reverse=True)
+
+    # 3. Reconstruct monthly snapshots by walking backward from today
+    # Start with current members, reverse each change as we go back in time
+    members = set(current)
+    snapshots = {}
+
+    # Generate monthly dates from end_date back to start_date
+    import pandas as pd
+    date_range = pd.date_range(start=start_date, end=end_date, freq="MS")
+    target_dates = sorted([d.strftime("%Y-%m-%d") for d in date_range], reverse=True)
+
+    change_idx = 0
+    for target_date in target_dates:
+        # Apply all changes between now and target_date (walking backward)
+        while change_idx < len(changes):
+            change_date = changes[change_idx].get("date", "")
+            if change_date < target_date:
+                break
+            # Reverse the change: added stock gets removed, removed stock gets added back
+            added_ticker = changes[change_idx].get("symbol", "")
+            removed_ticker = changes[change_idx].get("removedTicker", "")
+            if added_ticker:
+                members.discard(added_ticker)  # undo the addition
+            if removed_ticker:
+                members.add(removed_ticker)  # undo the removal
+            change_idx += 1
+
+        snapshots[target_date] = sorted(list(members))
+
+    logger.info(
+        f"PIT constituents: {len(snapshots)} monthly snapshots, "
+        f"{start_date} to {end_date}"
+    )
+
+    # Show survivorship bias impact
+    all_ever = set()
+    for tickers in snapshots.values():
+        all_ever.update(tickers)
+    only_historical = all_ever - current
+    if only_historical:
+        logger.info(
+            f"Survivorship bias fix: {len(only_historical)} stocks were in S&P 500 "
+            f"during backtest but later removed (e.g., {sorted(only_historical)[:5]})"
+        )
+
+    # Cache
+    os.makedirs(cache_dir, exist_ok=True)
+    to_cache = dict(snapshots)
+    to_cache["_start"] = start_date
+    to_cache["_end"] = end_date
+    with open(cache_file, "w") as f:
+        json.dump(to_cache, f)
+
+    return snapshots
+
+
+def get_pit_universe_tickers(
+    start_date: str, end_date: str, fmp_api_key: str = "", cache_dir: str = "data",
+) -> List[str]:
+    """
+    Get the UNION of all S&P 500 members across the backtest period.
+
+    This is the master ticker list for data download — includes stocks
+    that were in the index at any point during the period, even if later
+    removed/delisted. The PIT snapshots are used during walk-forward
+    training to ensure each window only trades stocks that were actually
+    in the index at that time.
+    """
+    snapshots = get_pit_sp500_constituents(start_date, end_date, fmp_api_key, cache_dir)
+    if not snapshots:
+        logger.warning("PIT constituents unavailable, falling back to current list")
+        return get_sp500_tickers()
+
+    all_tickers = set()
+    for tickers in snapshots.values():
+        all_tickers.update(tickers)
+
+    logger.info(f"PIT universe: {len(all_tickers)} unique tickers across {start_date} to {end_date}")
+    return sorted(list(all_tickers))
+
+
 def get_universe(cfg) -> List[str]:
     if cfg.universe_source == "sp500":
         return get_sp500_tickers()
+    elif cfg.universe_source == "sp500_pit":
+        fmp_key = getattr(cfg, "fmp_api_key", "") or os.environ.get("FMP_API_KEY", "")
+        end = pd.Timestamp.now().strftime("%Y-%m-%d")
+        start = (pd.Timestamp.now() - pd.DateOffset(years=cfg.lookback_years)).strftime("%Y-%m-%d")
+        return get_pit_universe_tickers(start, end, fmp_key)
     elif cfg.universe_source == "custom":
         return cfg.custom_tickers
     return get_sp500_tickers()

@@ -90,7 +90,7 @@ def cmd_compare(args):
         fetch_price_data, fetch_cross_asset_data,
         fetch_fundamental_data, fetch_earnings_dates,
     )
-    from universe import get_universe, filter_universe_by_liquidity, load_sector_map
+    from universe import get_universe, get_pit_universe_tickers, get_pit_sp500_constituents, filter_universe_by_liquidity, load_sector_map
     from fundamental_features import build_fundamental_features, build_pit_fundamental_features
     from cross_asset_features import build_cross_asset_features
     # Sentiment removed from ML model — used only in agent layer (OpenClaw)
@@ -128,8 +128,15 @@ def cmd_compare(args):
     logger.info("STEP 1-7: Shared data pipeline (identical for all models)")
     logger.info("=" * 60)
 
-    # 1. Universe & prices
-    tickers = get_universe(cfg.data)
+    # 1. Universe & prices — POINT-IN-TIME constituents (survivorship-bias-free)
+    pit_snapshots = None
+    if cfg.data.fmp_api_key:
+        end_date = pd.Timestamp.now().strftime("%Y-%m-%d")
+        start_date = (pd.Timestamp.now() - pd.DateOffset(years=cfg.data.lookback_years)).strftime("%Y-%m-%d")
+        tickers = get_pit_universe_tickers(start_date, end_date, cfg.data.fmp_api_key, cfg.data_dir)
+        pit_snapshots = get_pit_sp500_constituents(start_date, end_date, cfg.data.fmp_api_key, cfg.data_dir)
+    else:
+        tickers = get_universe(cfg.data)
     prices, volumes = fetch_price_data(tickers, cfg.data, cache_dir=cfg.data_dir)
     tickers = filter_universe_by_liquidity(tickers, cfg.data, prices, volumes)
     prices = prices[[t for t in tickers if t in prices.columns]]
@@ -238,9 +245,29 @@ def cmd_compare(args):
     X, y = panel_to_ml_format(features, target)
 
     # 7. Feature selection
-    max_feats = getattr(cfg.features, "max_features", 50)
-    selected_features = select_features_by_ic(X, y, max_features=max_feats)
-    X = X[selected_features]
+    # Feature selection is now done PER walk-forward window (no look-ahead).
+    # Pass all features through — each window selects its own top features
+    # using only training data available at that point.
+    max_feats = getattr(cfg.features, "max_features", 70)
+    selected_features = list(X.columns)  # all features passed through
+    logger.info(f"Passing {len(selected_features)} features to walk-forward "
+                f"(per-window selection: top {max_feats})")
+
+    # ============================================================
+    # HYPERPARAMETER TUNING (optional)
+    # ============================================================
+    if getattr(args, "tune", False):
+        from optuna_tuner import optimize_hyperparameters, apply_optuna_params
+        logger.info("=" * 60)
+        logger.info("OPTUNA HYPERPARAMETER OPTIMIZATION")
+        logger.info("=" * 60)
+        best_params = optimize_hyperparameters(
+            X, y, n_trials=60, n_cv_windows=4,
+            train_window=cfg.model.train_window_days,
+        )
+        if best_params:
+            cfg.model = apply_optuna_params(cfg.model, best_params)
+            logger.info(f"Applied tuned params: {best_params}")
 
     # ============================================================
     # RUN ALL MODELS
@@ -682,6 +709,7 @@ def main():
     cmp.add_argument("--long-biased", action="store_true")
     cmp.add_argument("--n-long", type=int)
     cmp.add_argument("--n-short", type=int)
+    cmp.add_argument("--tune", action="store_true", help="Run Optuna HP optimization before training")
 
     # --- signal ---
     sig = sub.add_parser("signal", help="Generate today's trading signals")

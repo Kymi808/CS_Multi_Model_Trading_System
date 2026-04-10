@@ -52,10 +52,12 @@ def run_single_model_pipeline(
     model_cfg = model_cfg_map.get(model_type, cfg.model)
 
     # Walk-forward training
+    max_feats = getattr(cfg.features, "max_features", 0)
     models, oos_predictions, metrics_df = walk_forward_train(
         X, y, cfg.model, cfg.features,
         model_type=model_type,
         model_cfg=model_cfg,
+        max_features=max_feats,
     )
 
     if oos_predictions.empty:
@@ -113,17 +115,13 @@ def run_single_model_pipeline(
         target_weights = constructor.construct_portfolio(
             predictions=day_preds, date=date,
             prev_weights=prev_weights, vol_estimates=vol_est,
+            sector_map=sector_map,
         )
 
-        target_weights = risk.apply_risk_scaling(
-            target_weights, portfolio_returns, sector_map,
-            n_long=n_long, n_short=n_short,
-        )
-
-        target_weights = target_weights.clip(
-            -cfg.portfolio.max_position_pct,
-            cfg.portfolio.max_position_pct,
-        )
+        # Risk scaling removed — portfolio constructor now handles sector caps,
+        # position limits, and turnover internally. Factor neutralization and
+        # vol/drawdown/tail risk scaling were destroying alpha signal.
+        # See portfolio.py docstring for design rationale.
 
         if not portfolio_returns.empty:
             risk.update(portfolio_returns.iloc[-1])

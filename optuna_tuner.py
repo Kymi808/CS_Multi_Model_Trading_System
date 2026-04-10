@@ -50,16 +50,16 @@ def optimize_hyperparameters(
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 1200, step=100),
-            "max_depth": trial.suggest_int("max_depth", 3, 7),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 8, 48, step=4),
-            "min_child_samples": trial.suggest_int("min_child_samples", 50, 300, step=25),
-            "subsample": trial.suggest_float("subsample", 0.5, 0.9, step=0.1),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 0.8, step=0.1),
-            "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 5.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 20.0, log=True),
-            "min_split_gain": trial.suggest_float("min_split_gain", 0.001, 0.1, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 400, 2000, step=100),
+            "max_depth": trial.suggest_int("max_depth", 4, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 16, 96, step=4),
+            "min_child_samples": trial.suggest_int("min_child_samples", 20, 200, step=10),
+            "subsample": trial.suggest_float("subsample", 0.5, 0.95, step=0.05),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.9, step=0.05),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.001, 3.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.05, 10.0, log=True),
+            "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 0.05),
         }
 
         rank_ics = []
@@ -128,6 +128,15 @@ def optimize_hyperparameters(
     logger.info(f"  Best params: {best.params}")
 
     _print_summary(study)
+
+    # Save best params to disk for production retraining
+    import json, os
+    params_path = os.path.join("results", "optuna_best_params.json")
+    os.makedirs("results", exist_ok=True)
+    with open(params_path, "w") as f:
+        json.dump(best.params, f, indent=2)
+    logger.info(f"Saved best params to {params_path}")
+
     return best.params
 
 

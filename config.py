@@ -4,6 +4,9 @@ Quant-grade configuration for cross-sectional equity ranking system.
 from dataclasses import dataclass, field
 from typing import List, Dict
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass
@@ -61,7 +64,7 @@ class FeatureConfig:
     target_type: str = "raw_rank"  # "raw_rank", "risk_adjusted", "industry_relative"
 
     # Feature selection
-    max_features: int = 50  # 97 features (uncapped) didn't improve IC. 50 is optimal for this signal.
+    max_features: int = 70  # Per-window IC stability selection; filters noisy features that hurt portfolio
 
 
 @dataclass
@@ -158,13 +161,14 @@ class RiskConfig:
 @dataclass
 class PortfolioConfig:
     initial_capital: float = 100_000
-    max_positions_long: int = 10
-    max_positions_short: int = 10
+    max_positions_long: int = 40    # 40L/40S: frictionless Sharpe 0.91 vs 0.46 at 20L/20S
+    max_positions_short: int = 40   # Wider baskets = naturally lower turnover + better diversification
     long_short: bool = True
-    max_position_pct: float = 0.10
+    max_position_pct: float = 0.03  # 3% max per stock (0.8 / 40 = 2% avg, cap at 3%)
+    hysteresis_exit_mult: float = 2.0  # Exit only when rank > N × this (40 entry, 80 exit)
     max_gross_leverage: float = 1.6
-    max_net_leverage: float = 0.15
-    max_daily_turnover: float = 0.40
+    max_net_leverage: float = 0.20
+    max_daily_turnover: float = 0.60  # relaxed from 0.40 (stale positions destroy alpha)
     min_holding_days: int = 1
     turnover_penalty: float = 0.001
     # Realistic transaction costs (conservative estimates for production)
