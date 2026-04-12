@@ -213,29 +213,43 @@ def _build_sector_momentum_features(
         feats[("sector", f"sector_rank_{w}d")] = stock_sector_rank
 
 
+def _rolling_pct_rank(series, window=252, min_periods=63):
+    """
+    Rolling percentile rank — PIT version of .rank(pct=True).
+
+    At each date, returns the fraction of the last `window` values
+    that are <= current value. Only looks at past/current data (no look-ahead).
+    """
+    return series.rolling(window, min_periods=min_periods).apply(
+        lambda x: (x <= x[-1]).mean(), raw=True
+    )
+
+
 def _build_risk_regime_features(feats, ca, tickers, windows):
     """
     Composite risk-on/risk-off indicator.
     Risk-on: stocks up, VIX down, credit tight, yields up
     Risk-off: stocks down, VIX up, credit wide, yields down
+
+    PIT: uses rolling 252-day percentile rank (not global rank).
     """
     signals = []
 
     if "^GSPC" in ca.columns:
         sp_ret = np.log(ca["^GSPC"] / ca["^GSPC"].shift(21))
-        signals.append(sp_ret.rank(pct=True))
+        signals.append(_rolling_pct_rank(sp_ret))
 
     if "^VIX" in ca.columns:
         vix_chg = ca["^VIX"].pct_change(21)
-        signals.append(1 - vix_chg.rank(pct=True))  # Invert: VIX up = risk-off
+        signals.append(1 - _rolling_pct_rank(vix_chg))  # Invert: VIX up = risk-off
 
     if "HYG" in ca.columns:
         hyg_ret = np.log(ca["HYG"] / ca["HYG"].shift(21))
-        signals.append(hyg_ret.rank(pct=True))
+        signals.append(_rolling_pct_rank(hyg_ret))
 
     if "TLT" in ca.columns:
         tlt_ret = np.log(ca["TLT"] / ca["TLT"].shift(21))
-        signals.append(1 - tlt_ret.rank(pct=True))  # Bonds up = risk-off
+        signals.append(1 - _rolling_pct_rank(tlt_ret))  # Bonds up = risk-off
 
     if signals:
         risk_indicator = pd.concat(signals, axis=1).mean(axis=1)

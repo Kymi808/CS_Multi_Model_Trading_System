@@ -244,7 +244,7 @@ def fetch_fmp_historical_fundamentals(
     tickers: List[str],
     api_key: str = "",
     cache_dir: str = "data",
-    n_quarters: int = 24,
+    n_quarters: int = 40,  # 10 years of quarterly data (matches 8-year lookback + 2yr buffer)
 ) -> Dict[str, List[dict]]:
     """
     Fetch HISTORICAL quarterly fundamentals with SEC filing dates.

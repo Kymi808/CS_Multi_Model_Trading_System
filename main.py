@@ -115,6 +115,17 @@ def cmd_compare(args):
     if args.no_ensemble:
         cfg.comparison.run_ensemble = False
 
+    # Sleeve configuration (multi-horizon support)
+    sleeve_horizon = getattr(args, "sleeve_horizon", None)
+    if sleeve_horizon:
+        cfg.features.primary_target_horizon = sleeve_horizon
+        cfg.model.retrain_every_days = min(sleeve_horizon, 14)
+        cfg.results_dir = os.path.join(cfg.results_dir, f"sleeve_{sleeve_horizon}d")
+        cfg.model_dir = os.path.join(cfg.model_dir, f"sleeve_{sleeve_horizon}d")
+        logger.info(f"SLEEVE MODE: horizon={sleeve_horizon}d, "
+                    f"retrain={cfg.model.retrain_every_days}d, "
+                    f"results={cfg.results_dir}")
+
     logger.info("Starting multi-model comparison...")
     logger.info(f"Models: {cfg.comparison.models_to_run}")
 
@@ -209,15 +220,51 @@ def cmd_compare(args):
     except Exception as e:
         logger.warning(f"FMP alpha features skipped: {e}")
 
-    # NOTE: The following are EXCLUDED from backtest to prevent look-ahead bias:
-    # - Premium features (analyst estimates, Piotroski, price targets) = current snapshots
-    # - Insider features = synthetic/current data
-    # - OpenBB features = no historical data
-    # - Sentiment = current news
-    # These are used in live trading via signal_generator.py (where current data is correct).
+    # PIT premium features: insider trades + analyst grades + earnings quality
+    # All use proper publication dates (SEC filingDate / rating change date)
+    # so they're look-ahead-free and usable in both backtest and live.
     insider_feats = {}
     premium_feats = {}
     openbb_feats = {}
+    earnings_quality_feats = {}
+
+    if cfg.data.fmp_api_key:
+        try:
+            logger.info("Cooldown 5s before insider/grades fetch...")
+            _time.sleep(5)
+            from fmp_pit_premium import (
+                fetch_insider_trades_pit, build_insider_pit_features,
+                fetch_analyst_grades_pit, build_grades_pit_features,
+            )
+            insider_raw = fetch_insider_trades_pit(tickers, cfg.data.fmp_api_key, cfg.data_dir)
+            insider_feats = build_insider_pit_features(insider_raw, prices, sector_map)
+
+            logger.info("Cooldown 5s before grades fetch...")
+            _time.sleep(5)
+            grades_raw = fetch_analyst_grades_pit(tickers, cfg.data.fmp_api_key, cfg.data_dir)
+            premium_feats = build_grades_pit_features(grades_raw, prices)
+        except Exception as e:
+            logger.warning(f"PIT premium features failed: {e}")
+            insider_feats = {}
+            premium_feats = {}
+
+        # PIT earnings quality features (Sloan accruals, asset growth, shareholder yield)
+        try:
+            logger.info("Cooldown 5s before earnings quality fetch...")
+            _time.sleep(5)
+            from fmp_earnings_quality import (
+                fetch_earnings_quality_raw, build_earnings_quality_features,
+            )
+            eq_raw = fetch_earnings_quality_raw(tickers, cfg.data.fmp_api_key, cfg.data_dir)
+            earnings_quality_feats = build_earnings_quality_features(eq_raw, prices)
+        except Exception as e:
+            logger.warning(f"Earnings quality features failed: {e}")
+            earnings_quality_feats = {}
+
+    # Merge earnings quality features into premium_feats (same pipeline)
+    if earnings_quality_feats:
+        premium_feats.update(earnings_quality_feats)
+        logger.info(f"Merged {len(earnings_quality_feats)} earnings quality features into premium pool")
 
     # 6. Feature engineering
     features, targets = build_all_features(
@@ -254,7 +301,7 @@ def cmd_compare(args):
                 f"(per-window selection: top {max_feats})")
 
     # ============================================================
-    # HYPERPARAMETER TUNING (optional)
+    # HYPERPARAMETER CONFIGURATION
     # ============================================================
     if getattr(args, "tune", False):
         from optuna_tuner import optimize_hyperparameters, apply_optuna_params
@@ -264,10 +311,25 @@ def cmd_compare(args):
         best_params = optimize_hyperparameters(
             X, y, n_trials=60, n_cv_windows=4,
             train_window=cfg.model.train_window_days,
+            save_dir=cfg.results_dir,
+            parallel_trials=getattr(cfg.model, "optuna_parallel_trials", 1),
+            lightgbm_n_jobs=getattr(cfg.model, "lightgbm_n_jobs", -1),
         )
         if best_params:
             cfg.model = apply_optuna_params(cfg.model, best_params)
             logger.info(f"Applied tuned params: {best_params}")
+    elif getattr(args, "use_saved_hp", False):
+        # Load HP from results/optuna_best_params.json (production path)
+        from optuna_tuner import apply_optuna_params
+        import json as _json
+        hp_path = os.path.join(cfg.results_dir, "optuna_best_params.json")
+        if os.path.exists(hp_path):
+            with open(hp_path) as f:
+                saved_params = _json.load(f)
+            cfg.model = apply_optuna_params(cfg.model, saved_params)
+            logger.info(f"Loaded saved HP from {hp_path}: {saved_params}")
+        else:
+            logger.warning(f"No saved HP at {hp_path}, using defaults")
 
     # ============================================================
     # RUN ALL MODELS
@@ -279,6 +341,7 @@ def cmd_compare(args):
         sector_map=sector_map,
         selected_features=selected_features,
         fmp_historical=fmp_historical,
+        pit_snapshots=pit_snapshots,
     )
 
     # ============================================================
@@ -710,6 +773,9 @@ def main():
     cmp.add_argument("--n-long", type=int)
     cmp.add_argument("--n-short", type=int)
     cmp.add_argument("--tune", action="store_true", help="Run Optuna HP optimization before training")
+    cmp.add_argument("--use-saved-hp", action="store_true", help="Load HP from results/optuna_best_params.json (skip tuning)")
+    cmp.add_argument("--sleeve-horizon", type=int, default=None,
+                     help="Run as horizon sleeve (e.g. 10, 21, 63). Auto-sets retrain=min(horizon,14) and writes results to sleeve-specific dir.")
 
     # --- signal ---
     sig = sub.add_parser("signal", help="Generate today's trading signals")

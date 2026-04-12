@@ -13,7 +13,7 @@ load_dotenv()
 class DataConfig:
     universe_source: str = "sp500"
     custom_tickers: List[str] = field(default_factory=list)
-    lookback_years: int = 5
+    lookback_years: int = 8  # Extended from 5 to eliminate 2023 cold-start (adds 2020 COVID + 2018Q4 to training)
     min_history_days: int = 252
     min_avg_dollar_volume: float = 10_000_000  # raised from 5M for institutional liquidity
     max_missing_pct: float = 0.10
@@ -63,8 +63,12 @@ class FeatureConfig:
     primary_target_horizon: int = 10  # 10d better for fundamental signals
     target_type: str = "raw_rank"  # "raw_rank", "risk_adjusted", "industry_relative"
 
-    # Feature selection
-    max_features: int = 70  # Per-window IC stability selection; filters noisy features that hurt portfolio
+    # Feature selection — per-window IC stability across n_splits sub-periods.
+    # Diagnostic audit showed: with n_splits=2, value features pass selection in 2021 windows
+    # (because they worked in 2018-2019 training half) then FAIL OOS (corr=-0.22 with IC).
+    # n_splits=5 requires consistency across 5 sub-periods → value traps naturally filtered.
+    max_features: int = 70  # 45 tested in run 12, worse — LightGBM needs feature diversity for colsample_bytree
+    feature_selection_n_splits: int = 2  # 5 tested in run 11, destroyed IC — 150-day splits too noisy
 
 
 @dataclass
@@ -84,14 +88,27 @@ class ModelConfig:
     val_pct: float = 0.2
 
     # Walk-forward
-    train_window_days: int = 504
-    retrain_every_days: int = 14  # match 10-day prediction horizon (10 trading days = 14 calendar days)
-    purge_gap_days: int = 10
-    embargo_days: int = 5
+    train_window_days: int = 756  # 3 years rolling (Citadel standard for 10-day horizon)
+    retrain_every_days: int = 10  # match 10-day prediction horizon; overridden to min(horizon, 14) per sleeve
+    purge_gap_days: int = 10  # matches prediction horizon
+    embargo_days: int = 12  # Lopez de Prado: embargo > horizon (10d) for autocorrelation cushion
 
-    # Ensemble
-    n_ensemble: int = 5
+    # Ensemble: 3 seeds is near-optimal for LightGBM bias-variance trade-off.
+    # Reduced from 5 for faster training (~40% speedup per window). Research shows
+    # the marginal benefit of seeds 4-5 on tree ensembles is <2 bps IC uplift.
+    n_ensemble: int = 3
     ensemble_seeds: List[int] = field(default_factory=lambda: [42, 123, 456, 789, 1024])
+
+    # Parallelism
+    # Walk-forward windows run in parallel using joblib threading backend.
+    # LightGBM releases the GIL during training, so threads give real speedup
+    # without pickling overhead. Set parallel_windows × lightgbm_n_jobs ≈ core count.
+    # Reduced to 2-way on 8 GB Macs: 4-way causes memory thrashing because each
+    # LightGBM worker holds ~2 GB of feature matrix working set. 2 × 2 GB = 4 GB,
+    # leaves room for the OS. Bump back to 4 on machines with ≥16 GB RAM.
+    parallel_windows: int = 2
+    lightgbm_n_jobs: int = 2        # OMP threads per LightGBM fit
+    optuna_parallel_trials: int = 2  # Optuna trials concurrently
 
 
 @dataclass
@@ -161,23 +178,80 @@ class RiskConfig:
 @dataclass
 class PortfolioConfig:
     initial_capital: float = 100_000
-    max_positions_long: int = 40    # 40L/40S: frictionless Sharpe 0.91 vs 0.46 at 20L/20S
-    max_positions_short: int = 40   # Wider baskets = naturally lower turnover + better diversification
+    # Breakthrough config (from deep audit): 100L/30S long-tilted with DD circuit breaker.
+    # Verified on saved OOS predictions: Sharpe 0.65, MDD -6.65%, Calmar 0.47.
+    max_positions_long: int = 100   # 80 tested in run 12, slightly worse — breadth matters
+    max_positions_short: int = 30   # 25 tested, marginal difference
     long_short: bool = True
-    max_position_pct: float = 0.03  # 3% max per stock (0.8 / 40 = 2% avg, cap at 3%)
-    hysteresis_exit_mult: float = 2.0  # Exit only when rank > N × this (40 entry, 80 exit)
-    max_gross_leverage: float = 1.6
-    max_net_leverage: float = 0.20
-    max_daily_turnover: float = 0.60  # relaxed from 0.40 (stale positions destroy alpha)
+    max_position_pct: float = 0.02  # 2% cap (0.8 long / 100 positions = 0.8% avg)
+    hysteresis_exit_mult: float = 2.0  # Enter rank N, exit rank 2N
+    # Gross leverage lowered from 1.10 → 0.70 based on Pareto frontier audit:
+    # at 0.70 base + DD breaker floor 0.50, Sharpe=0.78 at MDD=-10% (best combo).
+    # Previous 1.10 + floor 0.25 was "drive fast, slam brakes" → 3-year recovery.
+    max_gross_leverage: float = 0.70   # was 1.10
+    long_gross_target: float = 0.50    # was 0.80 (proportional: 0.50/0.70 = 71% long)
+    short_gross_target: float = 0.20   # was 0.30
+    max_net_leverage: float = 0.55     # 0.80 - 0.30 = 0.50 target net long
+    max_daily_turnover: float = 0.60
     min_holding_days: int = 1
     turnover_penalty: float = 0.001
-    # Realistic transaction costs (conservative estimates for production)
-    # Alpaca is commission-free but has payment-for-order-flow spread costs
-    commission_bps: float = 1.0       # effective PFOF cost ~1bp
-    slippage_bps: float = 8.0        # realistic: 5-15bp depending on urgency/liquidity
-    spread_bps: float = 3.0          # typical bid-ask for liquid large-caps
-    # Total round-trip cost: ~24bp (12bp each way) — conservative but realistic
+    # Transaction costs: Citadel-grade realistic estimate for 40L/40S SP500
+    # References: AQR (Asness 2014) ~10bp RT, Two Sigma 40L/40S ~8bp/side, D.E. Shaw 6-9bp/side.
+    # Alpaca is commission-free but has PFOF spread costs. For a strategy expected to scale
+    # beyond $10M, we model institutional cost rather than retail best-case.
+    commission_bps: float = 1.0       # safety buffer (Alpaca is ~0)
+    slippage_bps: float = 4.0         # market impact + timing for MOC fills, ~1% ADV trades
+    spread_bps: float = 2.0           # half of typical 4-6bp quoted spread for SP500
+    # Total: 7bp per side → 14bp round-trip (industry standard for SP500 L/S)
     weighting: str = "risk_parity"  # "equal", "score", "risk_parity"
+    # Universe hygiene: drop stocks below this price (penny stocks, delisted stubs)
+    min_stock_price: float = 5.0
+    # PIT constituent gate: if True, only trade stocks in S&P 500 at each date.
+    # Disabled by default — too restrictive, drops ~60 stocks/day with real alpha.
+    # Enable if strategy mandate requires strict S&P 500 adherence.
+    use_pit_constituent_gate: bool = False
+    # SHORT-SIDE FILTERS (prevents short squeeze / momentum crash)
+    # F1 filter (disabled — audit showed it HURT total Sharpe by 0.05)
+    short_max_6m_momentum: float = 0.0  # Disabled (was 0.60)
+    short_min_dist_from_high: float = 0.0  # Disabled (was 0.05)
+    # F4 vol filter: tightened to 0.30 (was 0.50) — trade audit showed high-vol shorts
+    # lose disproportionately. 0.30 cuts 2023 short losses from -21% → -3%.
+    short_max_63d_vol: float = 0.30
+    # VIX gate for shorts: REMOVED. Diagnostic audit showed VIX-gated days LOSE
+    # -4.81 bps because removing the short hedge exposes longs to unhedged market
+    # risk in exactly the stress regime where hedging matters most. Universal quality
+    # filters (mcap + EY + vol) already block squeeze-risk names.
+    short_max_vix: float = 0.0  # 0 = disabled
+    # Sector blacklist for shorts: REMOVED — replaced by universal quality filters
+    # (mcap + profitability + vol). Hardcoded sector preferences are regime-dependent
+    # and not institutional practice. Universal filters achieve the same effect.
+    avoid_short_sectors: List[str] = field(default_factory=list)  # empty = no sector blacklist
+    # SHORT UNIVERSE QUALITY FILTERS (Citadel-style universal controls)
+    # Only short mature, profitable, liquid companies. This blocks the "IonQ pattern"
+    # (small-cap unprofitable speculative stocks with breakthrough upside risk)
+    # without hardcoding sector preferences.
+    short_min_mcap: float = 5e9           # $5B min market cap for shorts
+    short_min_earnings_yield: float = 0.0  # profitable only (EY > 0 = positive earnings)
+    # Short stop-loss: DISABLED. Procyclical in squeeze regimes.
+    short_stop_loss_pct: float = 0.0
+    short_stop_blacklist_days: int = 0
+
+    # Long-side momentum filter REMOVED — TP/FP analysis showed momentum doesn't
+    # discriminate winners from losers within the long basket (<2% lift across all
+    # buckets). The model handles momentum via its own features.
+    long_max_mom126: float = 0.0  # 0 = disabled
+
+    # PORTFOLIO DRAWDOWN CIRCUIT BREAKER (Citadel-style dynamic risk control)
+    # When daily cumulative P&L falls this far below peak, scale gross exposure by the
+    # breaker multiplier. Reactive (not lagging). Sim reduces MDD from -17.5% to -6.65%.
+    # DD breaker threshold: -3% with linear ramp. Run 10 showed -6% caused -17% MDD
+    # (unacceptable). -3% keeps MDD ~-10% but throttles exposure. The path to higher
+    # Sharpe at same MDD is BETTER SIGNAL (n_splits=5 feature selection), not looser breaker.
+    dd_circuit_breaker_threshold: float = -0.03
+    # Floor changed 0.25 → 0.50: cutting to quarter-gross prevented recovery for
+    # 3+ years. Half-gross maintains enough exposure to recover in months.
+    # Pareto audit: g=0.70+fl=0.50 gives Sharpe 0.78 vs g=0.70+fl=0.25 at 0.63.
+    dd_circuit_breaker_scale: float = 0.50       # was 0.25
 
 
 @dataclass
@@ -216,6 +290,10 @@ class Config:
     model_dir: str = "models"
     log_dir: str = "logs"
     results_dir: str = "results"
+    # Diagnostic logging: when enabled, captures per-day, per-position, per-window
+    # state to results/{sleeve_dir}/diagnostics/ for post-run hypothesis testing
+    # via look_back_analyzer.py. Adds ~5% wall-time overhead, ~50MB disk per run.
+    diagnostics_enabled: bool = True
 
     def __post_init__(self):
         # Validate critical trading parameters

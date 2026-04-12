@@ -235,5 +235,14 @@ def build_interaction_features(
 
 
 def _rank_single(series: pd.Series) -> pd.Series:
-    """Rank a single time series (0-1)."""
-    return series.rank(pct=True)
+    """
+    Rolling percentile rank of a single time series — PIT-correct.
+
+    Previously used .rank(pct=True), which computed rank over the FULL series,
+    including future values. That was look-ahead bias even if the parent feature
+    was dead code. Now uses a 252-day rolling window so the feature is safe
+    if build_interaction_features is ever re-enabled.
+    """
+    return series.rolling(252, min_periods=63).apply(
+        lambda x: (x <= x[-1]).mean(), raw=True
+    )

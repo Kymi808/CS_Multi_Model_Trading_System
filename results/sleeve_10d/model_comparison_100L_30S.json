@@ -1,0 +1,44 @@
+{
+  "Annual Return": {
+    "lightgbm": 0.03828246656160261,
+    "spy_benchmark": 0.12326436304914212
+  },
+  "Volatility": {
+    "lightgbm": 0.06362368628382722,
+    "spy_benchmark": 0.16996288118085268
+  },
+  "Sharpe Ratio": {
+    "lightgbm": 0.6017013911110002,
+    "spy_benchmark": 0.7252427997237352
+  },
+  "Sortino Ratio": {
+    "lightgbm": 0.8305711594527795,
+    "spy_benchmark": 0.9961442291776618
+  },
+  "Max Drawdown": {
+    "lightgbm": -0.1007606985492413,
+    "spy_benchmark": -0.24496382573917075
+  },
+  "Calmar Ratio": {
+    "lightgbm": 0.37993447160898186,
+    "spy_benchmark": 0.503194125276475
+  },
+  "Win Rate": {
+    "lightgbm": 0.5318979266347688,
+    "spy_benchmark": 0.5431309904153354
+  },
+  "Profit Factor": {
+    "lightgbm": 1.1147295698993522,
+    "spy_benchmark": 1.147525787360297
+  },
+  "Avg Rank IC": {
+    "lightgbm": 0.016942191327042513
+  },
+  "IC Info Ratio": {
+    "lightgbm": 0.1951241419550386
+  },
+  "Total Return": {
+    "lightgbm": 0.2055608500072621,
+    "spy_benchmark": 0.7815880881551256
+  }
+}

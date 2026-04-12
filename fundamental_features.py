@@ -189,18 +189,38 @@ def build_pit_fundamental_features(
     # --- Earnings event features (already date-aware) ---
     _build_earnings_features(feats, earnings_dates, tickers, dates, prices)
 
-    # --- Sector-relative (using PIT data) ---
+    # --- Sector-relative (PIT version — proper per-date computation) ---
+    # For each date T, compute each stock's earnings yield sector-relative
+    # using only fundamentals available at T. No static broadcast = no look-ahead.
     if sector_map:
-        # Get latest available fundamentals per ticker for sector-relative
-        # This is a simplification — ideally each date would have its own sector-relative
-        latest_fund = {}
-        for t in tickers:
-            recs = historical_data.get(t, [])
-            if recs:
-                latest = recs[-1]  # last record (most recent quarter)
-                latest_fund[t] = latest
-        if latest_fund:
-            _build_sector_relative_features(feats, latest_fund, tickers, dates, sector_map)
+        # We already have PIT earnings yield as a DataFrame (dates x tickers)
+        ey_df = _broadcast_pit(historical_data, "trailingPE", tickers, dates)
+        ey_df = 1.0 / ey_df.where(ey_df > 0)  # invert PE to yield, drop negatives
+
+        if ey_df.notna().sum().sum() > 0:
+            # Build sector assignment Series
+            sector_series = pd.Series({t: sector_map.get(t, "Unknown") for t in tickers})
+
+            # Compute sector-relative z-score per date, per sector
+            sector_rel = pd.DataFrame(np.nan, index=dates, columns=tickers)
+            for sector in sector_series.unique():
+                if sector == "Unknown":
+                    continue
+                sector_cols = sector_series[sector_series == sector].index.tolist()
+                sector_cols = [c for c in sector_cols if c in ey_df.columns]
+                if len(sector_cols) < 3:
+                    continue
+                sector_ey = ey_df[sector_cols]
+                sector_mean = sector_ey.mean(axis=1)
+                sector_std = sector_ey.std(axis=1)
+                # Z-score of each stock vs its sector peers at each date
+                for col in sector_cols:
+                    z = (sector_ey[col] - sector_mean) / sector_std.replace(0, np.nan)
+                    sector_rel[col] = z
+
+            if sector_rel.notna().sum().sum() > 0:
+                feats[("fund", "sector_rel_value")] = sector_rel
+                feats[("fund", "cs_rank_sector_rel_value")] = _rank_cross_sectional(sector_rel)
 
     # --- PIT Quality Scores (computed from historical financials) ---
     # Piotroski F-Score proxy: quality signals from available ratios

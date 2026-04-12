@@ -193,26 +193,30 @@ class SignalGenerator:
         except Exception as e:
             logger.debug(f"OpenBB features skipped: {e}")
 
-        # 5d. Insider features (SEC Form 4)
+        # 5d. PIT insider + analyst grades features (SAME builders as backtest,
+        # zero train/serve skew). Uses FMP historical endpoints with proper
+        # publication dates (SEC filingDate / rating change date).
         insider_feats = {}
-        try:
-            from insider_features import fetch_insider_data, build_insider_features
-            insider_data = fetch_insider_data(tickers, cache_dir=self.cfg.data_dir)
-            insider_feats = build_insider_features(insider_data, prices, self.fundamentals)
-        except Exception as e:
-            logger.debug(f"Insider features skipped: {e}")
-
-        # 5e. Premium FMP features (analyst estimates, Piotroski, Claude sentiment, etc.)
         premium_feats = {}
-        try:
-            premium_feats = build_premium_features(
-                tickers, prices, self.cfg.data.fmp_api_key, self.cfg.data_dir,
-                live_mode=True,
-            )
-            if premium_feats:
-                logger.info(f"Premium features: {len(premium_feats)} signals")
-        except Exception as e:
-            logger.debug(f"Premium features skipped: {e}")
+        if self.cfg.data.fmp_api_key:
+            try:
+                from fmp_pit_premium import (
+                    fetch_insider_trades_pit, build_insider_pit_features,
+                    fetch_analyst_grades_pit, build_grades_pit_features,
+                )
+                insider_raw = fetch_insider_trades_pit(
+                    tickers, self.cfg.data.fmp_api_key, self.cfg.data_dir,
+                )
+                insider_feats = build_insider_pit_features(insider_raw, prices, self.sector_map)
+
+                grades_raw = fetch_analyst_grades_pit(
+                    tickers, self.cfg.data.fmp_api_key, self.cfg.data_dir,
+                )
+                premium_feats = build_grades_pit_features(grades_raw, prices)
+            except Exception as e:
+                logger.warning(f"PIT premium features failed: {e}")
+                insider_feats = {}
+                premium_feats = {}
 
         # 6. Build features
         logger.info("Building features...")

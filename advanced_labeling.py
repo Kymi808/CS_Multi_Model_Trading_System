@@ -249,34 +249,5 @@ def create_daily_meta_labels(
     return correct
 
 
-def build_daily_meta_features(
-    primary_predictions: pd.Series,
-    base_features: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Build meta-features for the daily meta-model.
-
-    Includes:
-    - Primary model's confidence (absolute prediction)
-    - Volatility features
-    - Momentum regime
-    - Cross-sectional dispersion of predictions
-    """
-    meta = pd.DataFrame(index=base_features.index)
-
-    meta["primary_abs_prediction"] = np.abs(primary_predictions.reindex(base_features.index, fill_value=0))
-    meta["primary_direction"] = np.sign(primary_predictions.reindex(base_features.index, fill_value=0))
-
-    # Cross-sectional features of predictions
-    pred_values = primary_predictions.values
-    meta["pred_rank_pct"] = primary_predictions.rank(pct=True).reindex(base_features.index, fill_value=0.5)
-    meta["pred_zscore"] = (
-        (primary_predictions - primary_predictions.mean()) / primary_predictions.std()
-    ).reindex(base_features.index, fill_value=0)
-
-    # Pull vol and momentum features if available
-    for col in base_features.columns:
-        if any(kw in col for kw in ["vol_", "mom_", "vix_", "regime"]):
-            meta[f"meta_{col}"] = base_features[col]
-
-    return meta.fillna(0)
+# build_daily_meta_features removed: used .rank(pct=True) on full series (look-ahead)
+# and was not imported anywhere. Reintroduce only with rolling pct rank if needed.

@@ -86,7 +86,7 @@ def retrain(models_to_train: list[str] = None):
         fetch_fundamental_data, fetch_earnings_dates,
     )
     from universe import get_universe, filter_universe_by_liquidity, load_sector_map
-    from fundamental_features import build_fundamental_features
+    from fundamental_features import build_fundamental_features, build_pit_fundamental_features
     from cross_asset_features import build_cross_asset_features
     # Sentiment removed from ML model — used only in agent layer (OpenClaw)
     from features import build_all_features, panel_to_ml_format
@@ -114,22 +114,40 @@ def retrain(models_to_train: list[str] = None):
     # Sectors
     sector_map = load_sector_map(tickers, cache_dir=cfg.data_dir)
 
-    # Fundamentals (FMP bulk TTM — 2 API calls for all tickers)
+    # Fundamentals — POINT-IN-TIME (no look-ahead bias)
+    # Mirrors main.py: prefer FMP historical quarterly with filingDate, fall back
+    # to yfinance snapshot only if FMP is unavailable.
+    fmp_historical = None
     fundamentals = None
     if cfg.data.fmp_api_key:
         try:
-            from fmp_data_provider import fetch_bulk_fundamentals
-            fundamentals = fetch_bulk_fundamentals(tickers, cfg.data.fmp_api_key, cfg.data_dir)
-            if fundamentals and len(fundamentals) > len(tickers) * 0.3:
-                logger.info(f"  Using FMP bulk fundamentals ({len(fundamentals)} tickers)")
+            from fmp_data_provider import fetch_fmp_historical_fundamentals, get_pit_fundamentals
+            fmp_historical = fetch_fmp_historical_fundamentals(
+                tickers, cfg.data.fmp_api_key, cfg.data_dir,
+            )
+            if fmp_historical and len(fmp_historical) > len(tickers) * 0.3:
+                logger.info(f"  FMP historical PIT: {len(fmp_historical)} tickers")
+                # Latest snapshot for risk model (current state, not historical)
+                fundamentals = get_pit_fundamentals(
+                    fmp_historical, datetime.now().strftime("%Y-%m-%d"),
+                )
             else:
-                fundamentals = None
+                fmp_historical = None
         except Exception as e:
-            logger.warning(f"  FMP fundamentals failed: {e}")
+            logger.warning(f"  FMP historical failed: {e}")
+            fmp_historical = None
     if fundamentals is None:
         fundamentals = fetch_fundamental_data(tickers, cache_dir=cfg.data_dir)
     earnings_dates = fetch_earnings_dates(tickers, cache_dir=cfg.data_dir)
-    fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
+
+    if fmp_historical:
+        # PIT fundamentals — uses filingDate, no look-ahead
+        fund_feats = build_pit_fundamental_features(
+            fmp_historical, prices, earnings_dates, sector_map,
+        )
+    else:
+        logger.warning("  Using yfinance fundamentals (KNOWN LOOK-AHEAD BIAS)")
+        fund_feats = build_fundamental_features(fundamentals, prices, earnings_dates, sector_map)
 
     # Cross-asset
     all_ca = cfg.data.cross_asset_tickers + cfg.data.sector_etfs
@@ -213,45 +231,95 @@ def retrain(models_to_train: list[str] = None):
     X, y = panel_to_ml_format(features, target)
     logger.info(f"  ML dataset: {X.shape[0]} samples, {X.shape[1]} features")
 
-    # ── Step 3: Feature selection ────────────────────────────────────
-    logger.info("Step 3: Feature selection...")
-    from backtest import select_features_by_ic
-    max_feats = getattr(cfg.features, "max_features", 50)
-    selected = select_features_by_ic(X, y, max_features=max_feats, min_abs_ic=0.005, n_splits=3)
-    X = X[selected]
-    logger.info(f"  Selected {len(selected)} features")
-
-    # ── Step 4: Train each model ─────────────────────────────────────
-    # Single pass: train on last train_window_days, validate on most recent data
-    train_window = cfg.model.train_window_days
+    # ── Step 3: Train/val split FIRST (before feature selection to avoid leakage) ──
+    # Single pass: train on all but last val_size + embargo days, validate on last val_size
+    # Embargo prevents label overlap between train and val (horizon=10, embargo=10).
+    embargo = cfg.model.embargo_days
+    val_size = 21
     dates = sorted(X.index.get_level_values(0).unique()) if isinstance(X.index, pd.MultiIndex) else sorted(X.index.unique())
 
-    # Split: train on all but last 21 days, validate on last 21 days
-    val_size = 21
-    train_dates = dates[:-val_size]
-    val_dates = dates[-val_size:]
+    if len(dates) <= val_size + embargo + 100:
+        logger.warning(f"Too few dates ({len(dates)}) for embargoed split, using simple split")
+        train_dates = dates[:-val_size]
+        val_dates = dates[-val_size:]
+    else:
+        train_dates = dates[:-(val_size + embargo)]
+        val_dates = dates[-val_size:]
 
     if isinstance(X.index, pd.MultiIndex):
-        X_train = X.loc[X.index.get_level_values(0).isin(train_dates)]
-        y_train = y.loc[y.index.isin(X_train.index)]
-        X_val = X.loc[X.index.get_level_values(0).isin(val_dates)]
-        y_val = y.loc[y.index.isin(X_val.index)]
+        X_train_full = X.loc[X.index.get_level_values(0).isin(train_dates)]
+        y_train_full = y.loc[y.index.isin(X_train_full.index)]
+        X_val_full = X.loc[X.index.get_level_values(0).isin(val_dates)]
+        y_val_full = y.loc[y.index.isin(X_val_full.index)]
     else:
-        X_train = X.loc[train_dates]
-        y_train = y.loc[train_dates]
-        X_val = X.loc[val_dates]
-        y_val = y.loc[val_dates]
+        X_train_full = X.loc[train_dates]
+        y_train_full = y.loc[train_dates]
+        X_val_full = X.loc[val_dates]
+        y_val_full = y.loc[val_dates]
 
+    # ── Step 4: Feature selection on TRAINING DATA ONLY (no val leakage) ──
+    logger.info("Step 4: Feature selection (training data only)...")
+    from backtest import select_features_by_ic
+    max_feats = getattr(cfg.features, "max_features", 50)
+    selected = select_features_by_ic(
+        X_train_full, y_train_full, max_features=max_feats, min_abs_ic=0.005, n_splits=3,
+    )
+    X_train = X_train_full[selected]
+    X_val = X_val_full[selected]
+    y_train = y_train_full
+    y_val = y_val_full
+    logger.info(f"  Selected {len(selected)} features from training data")
+
+    # ── Step 5: Train each model ─────────────────────────────────────
+    train_window = cfg.model.train_window_days
     logger.info(f"  Train: {len(X_train)} samples, Val: {len(X_val)} samples")
 
-    # Sample weights
+    # Sample weights: uniqueness (Lopez de Prado) × contemporaneous VIX regime weight.
+    # Matches main walk-forward loop in model.py — see _compute_regime_sample_weights.
+    # Down-weights training samples from high-VIX regimes (COVID, 2022, 2023 stress)
+    # using ONLY data available at each sample's date. Causal, no hardcoded dates.
     sample_weight = None
     try:
         from advanced_labeling import compute_sample_uniqueness
-        labels_df = pd.DataFrame({"date": X_train.index.get_level_values(0) if isinstance(X_train.index, pd.MultiIndex) else X_train.index})
+        labels_df = pd.DataFrame({
+            "date": X_train.index.get_level_values(0)
+                    if isinstance(X_train.index, pd.MultiIndex)
+                    else X_train.index
+        })
         sample_weight = compute_sample_uniqueness(labels_df, max_holding_days=10)
     except Exception:
         pass
+
+    # VIX regime weighting (import from model.py to keep the logic single-sourced)
+    try:
+        from model import _load_vix_regime_series, _compute_regime_sample_weights
+        vix_series = _load_vix_regime_series(cfg.data_dir)
+        if vix_series is not None:
+            train_dates_idx = (
+                X_train.index.get_level_values(0)
+                if isinstance(X_train.index, pd.MultiIndex)
+                else X_train.index
+            )
+            regime_w = _compute_regime_sample_weights(
+                train_dates_idx, vix_series,
+                vix_ref=20.0, vix_sat=35.0, floor_weight=0.30,
+            )
+            if regime_w is not None:
+                if sample_weight is None:
+                    sample_weight = regime_w
+                else:
+                    sample_weight = np.asarray(sample_weight) * regime_w
+                # Renormalize to mean 1 so LightGBM gradient scale stays comparable
+                sample_weight = (
+                    sample_weight * len(sample_weight) / sample_weight.sum()
+                )
+                n_down = int((regime_w < 0.5).sum())
+                logger.info(
+                    f"  VIX regime weighting: {n_down}/{len(regime_w)} samples at <0.5× "
+                    f"(avg regime_w={regime_w.mean():.3f})"
+                )
+    except Exception as e:
+        logger.debug(f"  VIX regime weighting skipped: {e}")
 
     for model_name in models_to_train:
         logger.info(f"\n{'='*60}")

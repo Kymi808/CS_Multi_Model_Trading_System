@@ -138,6 +138,92 @@ def advanced_features(prices: pd.DataFrame, volumes: pd.DataFrame, cfg: FeatureC
     return feats
 
 
+def risk_adjusted_momentum_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Sharpe-style momentum: return / volatility.
+
+    The KEY missing feature for distinguishing "steady uptrend" from "noisy random rally."
+    CVNA had high mom_63d (+500%) AND high vol — its Sharpe-mom was moderate.
+    But AAPL/NVDA steady uptrends have high mom AND low vol → high Sharpe-mom.
+
+    This feature lets the model learn "high Sharpe-mom = strong trend = don't short."
+    """
+    feats = {}
+    lr = _log_returns(prices)
+    for w in [21, 63, 126, 252]:
+        mom = lr.rolling(w).sum() * (252 / w)  # annualized
+        vol = lr.rolling(w).std() * np.sqrt(252)  # annualized
+        sharpe_mom = mom / (vol + 1e-8)
+        feats[f"sharpe_mom_{w}d"] = sharpe_mom
+        feats[f"cs_sharpe_mom_{w}d"] = sharpe_mom.rank(axis=1, pct=True)
+    return feats
+
+
+def momentum_consistency_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Momentum quality: how consistent is the trend?
+
+    A steady rally (70% positive days) is a strong trend.
+    A volatile rally (50% positive days) is a whipsaw.
+    Value shorts get crushed by CONSISTENT rallies, not noisy ones.
+
+    Also: rolling max-drawdown within the window as a quality metric.
+    """
+    feats = {}
+    lr = _log_returns(prices)
+    for w in [21, 63, 126]:
+        # Fraction of positive-return days in the window
+        pos_frac = (lr > 0).astype(float).rolling(w).mean()
+        feats[f"pos_days_frac_{w}d"] = pos_frac
+        feats[f"cs_pos_days_frac_{w}d"] = pos_frac.rank(axis=1, pct=True)
+
+    # Rolling max drawdown within window (smaller = smoother trend)
+    for w in [63, 126]:
+        cum = lr.rolling(w).sum()  # cumulative log return over window
+        rolling_max = cum.rolling(w, min_periods=1).max()
+        rolling_dd = cum - rolling_max  # always ≤ 0
+        feats[f"rolling_dd_{w}d"] = rolling_dd
+    return feats
+
+
+def trend_strength_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """
+    Trend linearity: how close is the log price to a straight line?
+
+    Uses rolling linear regression of log(price) vs time index.
+    High R² = strong linear trend (CVNA rally).
+    Low R² = choppy/sideways.
+    Slope captures direction and steepness.
+    """
+    feats = {}
+    log_prices = np.log(prices.clip(lower=1e-6))
+
+    for w in [63, 126]:
+        # Rolling slope via least squares
+        # For each column, compute slope of log_price vs time over window
+        # slope = covariance(log_price, time) / variance(time)
+        t = np.arange(w, dtype=float)
+        t_mean = t.mean()
+        t_var = ((t - t_mean) ** 2).sum()  # sum of squared deviations
+
+        def _rolling_slope(s):
+            # Vectorized rolling slope using the fact that var(t) is constant
+            rolled = s.rolling(w)
+            # x_mean varies per window, t_mean is constant
+            # slope = sum((x_i - x_mean)(t_i - t_mean)) / sum((t_i - t_mean)^2)
+            # Use apply with raw=True for speed
+            return rolled.apply(
+                lambda x: np.dot(x - x.mean(), t - t_mean) / t_var if len(x) == w else np.nan,
+                raw=True,
+            )
+
+        # Apply to each column (slow but correct; features.py tolerates this pattern)
+        slope = log_prices.apply(_rolling_slope)
+        feats[f"trend_slope_{w}d"] = slope
+        feats[f"cs_trend_slope_{w}d"] = slope.rank(axis=1, pct=True)
+    return feats
+
+
 def short_term_reversal_features(prices: pd.DataFrame, volumes: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """
     Short-term reversal signals (Jegadeesh 1990, Lo & MacKinlay 1990).
@@ -379,7 +465,12 @@ def cross_sectional_ranks(
     feature_dict: Dict[str, pd.DataFrame],
     key_features: Optional[List[str]] = None,
 ) -> Dict[str, pd.DataFrame]:
-    """Rank every feature cross-sectionally [0, 1]."""
+    """
+    Rank every feature cross-sectionally [0, 1].
+    Intentionally re-ranks already-cs_ features — LightGBM exploits them as subtle
+    re-normalizations (different tie-breaking) and the 0.65-Sharpe baseline relied
+    on this. Removing them caused IC to drop from 0.047 to 0.024.
+    """
     if key_features is None:
         key_features = list(feature_dict.keys())
     cs = {}
@@ -470,6 +561,10 @@ def build_all_features(
     pv_feats.update(factor_momentum_features(prices, cfg))
     pv_feats.update(calendar_features(prices))
     pv_feats.update(idiosyncratic_vol_features(prices))
+    # Momentum-quality features (address 2021/2023 failure mode)
+    pv_feats.update(risk_adjusted_momentum_features(prices))
+    pv_feats.update(momentum_consistency_features(prices))
+    pv_feats.update(trend_strength_features(prices))
 
     # Cross-sectional ranks of price/volume features
     cs_feats = cross_sectional_ranks(pv_feats)
@@ -493,20 +588,11 @@ def build_all_features(
         all_feats.update(cross_asset_feats)
         logger.info(f"  + Cross-asset: {len(cross_asset_feats)} features")
 
-    # Add fractionally differentiated price features (López de Prado Ch. 5)
-    # These are stationary while preserving memory — better than raw returns
-    try:
-        from advanced_labeling import add_frac_diff_features
-        # Apply to a subset of stocks (top 20 by volume to save computation)
-        top_tickers = volumes.mean().nlargest(20).index.tolist()
-        frac_prices = prices[top_tickers] if top_tickers else prices.iloc[:, :20]
-        fd_feats = add_frac_diff_features(frac_prices, d=0.4)
-        if not fd_feats.empty:
-            for col in fd_feats.columns:
-                all_feats[("pv", col)] = fd_feats[[col]].reindex(prices.index)
-            logger.info(f"  + Fractional diff: {len(fd_feats.columns)} features")
-    except Exception as e:
-        logger.debug(f"Fractional differentiation skipped: {e}")
+    # NOTE: Fractional differentiation removed from production pipeline.
+    # The previous implementation (top 20 tickers only) produced features that
+    # were always dropped by the >30% NaN filter. To add frac_diff back as a
+    # real contributor, it needs to be run on all tickers with adjusted
+    # threshold and measured as a standalone R&D experiment first.
 
     # Add insider features (SEC Form 4 data)
     if insider_feats:

@@ -11,7 +11,7 @@ import logging
 from typing import Dict
 
 logger = logging.getLogger(__name__)
-optuna.logging.set_verbosity(optuna.logging.WARNING)
+optuna.logging.set_verbosity(optuna.logging.INFO)
 
 
 def optimize_hyperparameters(
@@ -21,7 +21,17 @@ def optimize_hyperparameters(
     n_cv_windows: int = 5,
     train_window: int = 504,
     seed: int = 42,
+    save_dir: str = "results",
+    parallel_trials: int = 1,
+    lightgbm_n_jobs: int = -1,
 ) -> Dict:
+    """
+    Parallelism model:
+      - `parallel_trials`: number of Optuna trials to run concurrently (threading)
+      - `lightgbm_n_jobs`: OMP threads per LightGBM fit inside each trial
+      - Product should approximate physical core count to avoid OMP contention
+        (e.g. 4 trials × 2 lgb_threads on an 8-core Mac)
+    """
     if isinstance(X.index, pd.MultiIndex):
         dates = sorted(X.index.get_level_values(0).unique())
     else:
@@ -45,20 +55,24 @@ def optimize_hyperparameters(
 
     logger.info(
         f"Optuna: {n_trials} trials, {len(cv_splits)} CV windows, "
-        f"{n_dates} dates, train_window={effective_window}"
+        f"{n_dates} dates, train_window={effective_window}, "
+        f"parallel_trials={parallel_trials}, lgb_n_jobs={lightgbm_n_jobs}"
     )
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 400, 2000, step=100),
-            "max_depth": trial.suggest_int("max_depth", 4, 8),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 16, 96, step=4),
-            "min_child_samples": trial.suggest_int("min_child_samples", 20, 200, step=10),
-            "subsample": trial.suggest_float("subsample", 0.5, 0.95, step=0.05),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 0.9, step=0.05),
-            "reg_alpha": trial.suggest_float("reg_alpha", 0.001, 3.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 0.05, 10.0, log=True),
+            # Constrained ranges: prevents extreme regularization blowups like reg_lambda=4.16
+            # which collapsed prediction spread and halved IC. Citadel-standard ranges for
+            # LightGBM on 10-day equity ranking.
+            "n_estimators": trial.suggest_int("n_estimators", 500, 1500, step=100),
+            "max_depth": trial.suggest_int("max_depth", 5, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.04, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 32, 96, step=4),
+            "min_child_samples": trial.suggest_int("min_child_samples", 80, 200, step=10),
+            "subsample": trial.suggest_float("subsample", 0.6, 0.9, step=0.05),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 0.8, step=0.05),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.001, 0.5, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 1.0, log=True),
             "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 0.05),
         }
 
@@ -81,7 +95,7 @@ def optimize_hyperparameters(
                 X_va_c = X_va.replace([np.inf, -np.inf], np.nan)
 
                 model = lgb.LGBMRegressor(
-                    **params, random_state=seed, n_jobs=-1, verbose=-1,
+                    **params, random_state=seed, n_jobs=lightgbm_n_jobs, verbose=-1,
                 )
                 model.fit(
                     X_tr_c, y_tr,
@@ -115,7 +129,14 @@ def optimize_hyperparameters(
         sampler=optuna.samplers.TPESampler(seed=seed),
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=10),
     )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    # n_jobs>1 runs multiple trials concurrently via ThreadPoolExecutor.
+    # LightGBM releases the GIL during fit, so threading gives real speedup.
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        n_jobs=parallel_trials,
+        show_progress_bar=True,
+    )
 
     best = study.best_trial
     logger.info(f"Optuna complete: {n_trials} trials, best score: {best.value:.4f}")
@@ -129,10 +150,10 @@ def optimize_hyperparameters(
 
     _print_summary(study)
 
-    # Save best params to disk for production retraining
+    # Save best params to disk for production retraining (sleeve-specific path)
     import json, os
-    params_path = os.path.join("results", "optuna_best_params.json")
-    os.makedirs("results", exist_ok=True)
+    params_path = os.path.join(save_dir, "optuna_best_params.json")
+    os.makedirs(save_dir, exist_ok=True)
     with open(params_path, "w") as f:
         json.dump(best.params, f, indent=2)
     logger.info(f"Saved best params to {params_path}")
@@ -140,7 +161,9 @@ def optimize_hyperparameters(
     return best.params
 
 
-def _make_cv_splits(dates, n_windows, train_window, purge=10, embargo=5):
+def _make_cv_splits(dates, n_windows, train_window, purge=10, embargo=12):
+    """CV split generator with Lopez de Prado purge + embargo.
+    Defaults embargo=12 (> 10-day horizon) for autocorrelation cushion, matching config.py."""
     total = len(dates)
     if total < train_window + 30:
         train_window = max(50, total * 2 // 3)

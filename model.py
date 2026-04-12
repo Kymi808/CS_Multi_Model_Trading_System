@@ -44,6 +44,9 @@ class EnsembleRanker:
         self.feature_importance: Optional[pd.Series] = None
 
     def _get_lgb_params(self, seed: int) -> dict:
+        # n_jobs is configurable so callers can reduce OMP thread count when
+        # running multiple LightGBM fits concurrently (avoids thread contention).
+        n_jobs = getattr(self.cfg, "lightgbm_n_jobs", -1)
         params = {
             "n_estimators": self.cfg.n_estimators,
             "max_depth": self.cfg.max_depth,
@@ -56,7 +59,7 @@ class EnsembleRanker:
             "reg_lambda": self.cfg.reg_lambda,
             "min_split_gain": self.cfg.min_split_gain,
             "random_state": seed,
-            "n_jobs": -1,
+            "n_jobs": n_jobs,
             "verbose": -1,
         }
         # Use GPU if available (CUDA-compatible LightGBM)
@@ -159,6 +162,63 @@ class EnsembleRanker:
         self.feature_importance = data["feature_importance"]
 
 
+def _load_vix_regime_series(data_dir: str = "data") -> Optional[pd.Series]:
+    """
+    Load VIX time series for regime-aware sample weighting.
+
+    Returns None if unavailable — the training loop falls back to uniform weights.
+    Used to down-weight training samples from high-VIX regimes (COVID, 2022 rate
+    shock, 2023 SVB stress) without hardcoding dates. Citadel-standard approach:
+    use a contemporaneous, causal regime indicator rather than hindsight dates.
+    """
+    try:
+        ca_path = os.path.join(data_dir, "cross_asset.csv")
+        if os.path.exists(ca_path):
+            _ca = pd.read_csv(ca_path, index_col=0, parse_dates=True)
+            if "^VIX" in _ca.columns:
+                return _ca["^VIX"]
+    except Exception:
+        pass
+    return None
+
+
+def _compute_regime_sample_weights(
+    train_dates_idx: pd.Index,
+    vix_series: Optional[pd.Series],
+    vix_ref: float = 20.0,
+    vix_sat: float = 35.0,
+    floor_weight: float = 0.30,
+) -> Optional[np.ndarray]:
+    """
+    Compute per-sample regime weights from contemporaneous VIX level.
+
+    Mapping (linear, clipped):
+      VIX <= vix_ref (20)     → weight 1.0
+      VIX == vix_sat (35)     → weight floor_weight (0.30)
+      VIX >= vix_sat          → weight floor_weight (0.30)
+      VIX between             → linear interpolation
+
+    This auto-catches:
+      - COVID March 2020 (VIX 80+)  → 0.30
+      - 2022 rate shock (VIX 30+)    → ~0.40
+      - 2023 SVB stress (VIX 26+)    → ~0.65
+      - Normal conditions (VIX 15)  → 1.00
+
+    Returns None if vix_series is unavailable — caller falls back to uniform.
+    """
+    if vix_series is None:
+        return None
+    vix_at_dates = vix_series.reindex(train_dates_idx)
+    # Linear decay from vix_ref to vix_sat
+    span = max(vix_sat - vix_ref, 1e-6)
+    decay = (vix_at_dates - vix_ref) / span
+    regime_weight = 1.0 - decay * (1.0 - floor_weight)
+    regime_weight = regime_weight.clip(floor_weight, 1.0)
+    # Missing VIX dates → full weight (neutral assumption)
+    regime_weight = regime_weight.fillna(1.0)
+    return regime_weight.values
+
+
 def walk_forward_train(
     X: pd.DataFrame, y: pd.Series, cfg: ModelConfig, feature_cfg: FeatureConfig,
     model_type: str = "lightgbm", model_cfg=None, max_features: int = 0,
@@ -185,6 +245,12 @@ def walk_forward_train(
     # Use the appropriate config for non-LightGBM models
     effective_cfg = model_cfg if model_cfg is not None else cfg
 
+    # VIX regime series for sample weighting (causal, contemporaneous)
+    vix_regime_series = _load_vix_regime_series()
+    if vix_regime_series is not None:
+        logger.info(f"[{model_type.upper()}] VIX regime weighting active "
+                    f"({len(vix_regime_series)} dates loaded)")
+
     models = []
     all_preds = []
     metrics_history = []
@@ -208,12 +274,22 @@ def walk_forward_train(
             return df.iloc[mask]
         return df.loc[date_list]
 
+    # Walk-forward window layout (Lopez de Prado):
+    #   train:      [i, train_end)                    — training data, no overlap with future
+    #   purge gap:  [train_end, val_start)            — empty, prevents label leakage (size: purge)
+    #   val:        [val_start, val_end)              — for early stopping (size: val_size)
+    #   embargo:    [val_end, pred_start)             — prevents autocorrelation leakage
+    #   pred:       [pred_start, pred_end)            — out-of-sample predictions
+    val_size = max(embargo, 5)  # at least 5 days of val for early stopping
+
+    # Phase 1: build window plans (cheap, sequential)
+    window_plans = []
     for i in range(0, len(dates) - train_window, retrain_every):
-        train_end = i + train_window - purge
-        val_start = i + train_window - purge + embargo
-        val_end = i + train_window
-        pred_start = i + train_window
-        pred_end = min(i + train_window + retrain_every, len(dates))
+        train_end = i + train_window - purge - val_size - embargo
+        val_start = train_end + purge
+        val_end = val_start + val_size
+        pred_start = val_end + embargo
+        pred_end = min(pred_start + retrain_every, len(dates))
 
         if train_end < 0 or val_start >= len(dates) or pred_start >= len(dates):
             continue
@@ -225,43 +301,83 @@ def walk_forward_train(
         if len(train_dates) < 100 or not pred_dates:
             continue
 
-        X_tr = _select_by_dates(X, train_dates)
+        window_plans.append({
+            "window_num": len(window_plans) + 1,
+            "train_dates": train_dates,
+            "val_dates": val_dates,
+            "pred_dates": pred_dates,
+            "pred_start": pred_start,
+            "pred_end": pred_end,
+        })
+
+    # Phase 2: per-window worker function
+    def _train_one_window(plan):
+        X_tr = _select_by_dates(X, plan["train_dates"])
         y_tr = y.loc[X_tr.index]
-        X_v = _select_by_dates(X, val_dates)
+        X_v = _select_by_dates(X, plan["val_dates"])
         y_v = y.loc[X_v.index] if len(X_v) > 0 else pd.Series(dtype=float)
-        X_p = _select_by_dates(X, pred_dates)
+        X_p = _select_by_dates(X, plan["pred_dates"])
 
         if len(X_tr) < 100 or len(X_p) == 0:
-            continue
+            return None
 
         # Per-window feature selection (training data only — no look-ahead)
+        # n_splits controls regime robustness: more splits = features must be
+        # IC-consistent across more sub-periods → naturally filters value traps
+        # that work in one regime but fail in another.
+        window_features = None
+        n_splits = getattr(feature_cfg, 'feature_selection_n_splits', 2)
         if max_features > 0:
             from backtest import select_features_by_ic
             window_features = select_features_by_ic(
-                X_tr, y_tr, max_features=max_features, n_splits=2,
+                X_tr, y_tr, max_features=max_features, n_splits=n_splits,
             )
             X_tr = X_tr[window_features]
             if len(X_v) > 0:
                 X_v = X_v[window_features]
             X_p = X_p[window_features]
 
-        window_num = len(models) + 1
         logger.info(
-            f"[{model_type.upper()}] Window {window_num}: "
-            f"Train {train_dates[0].date()}→{train_dates[-1].date()} ({len(X_tr)}), "
-            f"Predict {pred_dates[0].date()}→{pred_dates[-1].date()}"
-            f"{f' ({len(window_features)} feats)' if max_features > 0 else ''}"
+            f"[{model_type.upper()}] Window {plan['window_num']}: "
+            f"Train {plan['train_dates'][0].date()}→{plan['train_dates'][-1].date()} ({len(X_tr)}), "
+            f"Predict {plan['pred_dates'][0].date()}→{plan['pred_dates'][-1].date()}"
+            f"{f' ({len(window_features)} feats)' if window_features else ''}"
         )
 
         model = create_model(model_type, effective_cfg)
 
-        # Sample weights: simple temporal decay (fast, no expensive computation)
+        # Sample weights: temporal decay × contemporaneous VIX regime weight.
+        # The VIX component is Citadel-standard regime weighting — it down-weights
+        # training samples from high-VIX periods (COVID, 2022 rate shock, 2023 SVB)
+        # using ONLY data available at each training sample's own date. No hindsight,
+        # no hardcoded "COVID was weird" flags. Linear mapping:
+        #   VIX≤20 → 1.0,  VIX=35 → 0.3,  VIX>35 → 0.3 floor
+        # COVID March 2020 (VIX 80) → 0.3, while VIX=15 days → 1.0.
         sample_weight = None
         if len(X_tr) > 100:
-            # More recent samples get higher weight (exponential decay)
             n = len(X_tr)
             sample_weight = np.exp(np.linspace(-1, 0, n))  # oldest=0.37, newest=1.0
             sample_weight = sample_weight * n / sample_weight.sum()  # normalize to mean=1
+
+            if isinstance(X_tr.index, pd.MultiIndex):
+                train_dates_idx = X_tr.index.get_level_values(0)
+            else:
+                train_dates_idx = X_tr.index
+
+            regime_w = _compute_regime_sample_weights(
+                train_dates_idx, vix_regime_series,
+                vix_ref=20.0, vix_sat=35.0, floor_weight=0.30,
+            )
+            if regime_w is not None:
+                sample_weight = sample_weight * regime_w
+                sample_weight = sample_weight * n / sample_weight.sum()  # renormalize
+                # Diagnostic (debug-level): how many samples are heavily down-weighted
+                n_downweighted = int((regime_w < 0.5).sum())
+                if n_downweighted > 0:
+                    logger.debug(
+                        f"  VIX regime weighting: {n_downweighted}/{n} samples at "
+                        f"<0.5× (avg regime_w={regime_w.mean():.3f})"
+                    )
 
         # Only LightGBM supports sample_weight — TST/CrossMamba don't
         train_kwargs = {}
@@ -274,33 +390,44 @@ def walk_forward_train(
             y_v if len(y_v) > 0 else None,
             **train_kwargs,
         )
-        metrics["window"] = window_num
-        metrics_history.append(metrics)
+        metrics["window"] = plan["window_num"]
+        # Capture diagnostic context (used by post-run analyzer)
+        metrics["train_start"] = str(plan["train_dates"][0].date()) if len(plan["train_dates"]) > 0 else None
+        metrics["train_end"] = str(plan["train_dates"][-1].date()) if len(plan["train_dates"]) > 0 else None
+        metrics["predict_start"] = str(plan["pred_dates"][0].date()) if len(plan["pred_dates"]) > 0 else None
+        metrics["predict_end"] = str(plan["pred_dates"][-1].date()) if len(plan["pred_dates"]) > 0 else None
+        metrics["n_train_samples"] = int(len(X_tr))
+        metrics["n_features_post_select"] = int(len(window_features)) if window_features else int(X_tr.shape[1])
+        # Sample weight stats (if applied)
+        if sample_weight is not None:
+            metrics["mean_sample_weight"] = float(np.mean(sample_weight))
+            metrics["pct_downweighted_below_05"] = float((np.asarray(sample_weight) < 0.5).mean())
+        # Top selected features (for stability analysis)
+        if window_features:
+            metrics["window_features"] = list(window_features[:20])  # top 20 names
 
+        # Predictions
+        preds = None
         if len(X_p) > 0:
-            # For sequence models (TST, CrossMamba), include lookback context
-            # so they can build sequences for the first prediction dates
             if model_type in ("tst", "crossmamba"):
+                # Sequence models need lookback context to build input sequences
                 seq_len = getattr(effective_cfg, "sequence_length", 21)
-                context_start = max(0, pred_start - seq_len)
-                context_dates = dates[context_start:pred_end]
+                context_start = max(0, plan["pred_start"] - seq_len)
+                context_dates = dates[context_start:plan["pred_end"]]
                 X_p_ctx = _select_by_dates(X, context_dates)
+                if window_features is not None:
+                    X_p_ctx = X_p_ctx[window_features]
                 preds = model.predict(X_p_ctx)
-                # Only keep predictions for actual pred_dates
                 if isinstance(preds.index, pd.MultiIndex):
-                    mask = preds.index.get_level_values(0).isin(pred_dates)
+                    mask = preds.index.get_level_values(0).isin(plan["pred_dates"])
                     preds = preds[mask]
                 else:
-                    preds = preds[preds.index.isin(pred_dates)]
-                if len(preds) > 0:
-                    all_preds.append(preds)
+                    preds = preds[preds.index.isin(plan["pred_dates"])]
             else:
                 preds = model.predict(X_p)
-                all_preds.append(preds)
 
-            # Compute IC for ALL model types (not just LightGBM)
-            # Uses out-of-sample predictions vs actual target
-            if model_type != "lightgbm" and len(preds) > 10:
+            # Compute OOS IC for non-LightGBM (LightGBM does this in .train via val set)
+            if model_type != "lightgbm" and preds is not None and len(preds) > 10:
                 try:
                     y_p = y.loc[preds.index]
                     common = preds.index.intersection(y_p.index)
@@ -315,7 +442,38 @@ def walk_forward_train(
                 except Exception:
                     pass
 
-        models.append(model)
+        return {
+            "window_num": plan["window_num"],
+            "model": model,
+            "preds": preds,
+            "metrics": metrics,
+        }
+
+    # Phase 3: run windows in parallel (LightGBM only — neural nets have their own threading)
+    parallel_windows = getattr(cfg, "parallel_windows", 1)
+    if parallel_windows > 1 and model_type == "lightgbm" and len(window_plans) > 1:
+        from joblib import Parallel, delayed
+        logger.info(
+            f"[{model_type.upper()}] Walk-forward parallelism: {parallel_windows} windows concurrently "
+            f"(lightgbm n_jobs={getattr(cfg, 'lightgbm_n_jobs', 2)}), {len(window_plans)} total"
+        )
+        # Threading backend: shares memory (no X pickling), LightGBM releases GIL during fit.
+        # Prefer='threads' forces true threading regardless of joblib defaults.
+        results = Parallel(n_jobs=parallel_windows, backend="threading", prefer="threads")(
+            delayed(_train_one_window)(plan) for plan in window_plans
+        )
+    else:
+        results = [_train_one_window(plan) for plan in window_plans]
+
+    # Phase 4: collect results in window order
+    results = [r for r in results if r is not None]
+    results.sort(key=lambda r: r["window_num"])
+
+    for r in results:
+        models.append(r["model"])
+        metrics_history.append(r["metrics"])
+        if r["preds"] is not None and len(r["preds"]) > 0:
+            all_preds.append(r["preds"])
 
     predictions = pd.concat(all_preds) if all_preds else pd.Series(dtype=float)
     metrics_df = pd.DataFrame(metrics_history)
