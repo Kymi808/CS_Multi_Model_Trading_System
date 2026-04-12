@@ -189,8 +189,8 @@ class PortfolioConfig:
     # at 0.70 base + DD breaker floor 0.50, Sharpe=0.78 at MDD=-10% (best combo).
     # Previous 1.10 + floor 0.25 was "drive fast, slam brakes" → 3-year recovery.
     max_gross_leverage: float = 0.70   # was 1.10
-    long_gross_target: float = 0.50    # was 0.80 (proportional: 0.50/0.70 = 71% long)
-    short_gross_target: float = 0.20   # was 0.30
+    long_gross_target: float = 0.45    # Pareto sweep: 0.45/0.25 = Sharpe 0.83, MDD -9.1%, net 0.20
+    short_gross_target: float = 0.25   # more short hedge than 0.20, moderate net exposure
     max_net_leverage: float = 0.55     # 0.80 - 0.30 = 0.50 target net long
     max_daily_turnover: float = 0.60
     min_holding_days: int = 1
