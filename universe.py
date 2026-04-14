@@ -340,15 +340,19 @@ def get_pit_universe_tickers(
 
 def get_universe(cfg) -> List[str]:
     if cfg.universe_source == "sp500":
-        return get_sp500_tickers()
+        tickers = get_sp500_tickers()
     elif cfg.universe_source == "sp500_pit":
         fmp_key = getattr(cfg, "fmp_api_key", "") or os.environ.get("FMP_API_KEY", "")
         end = pd.Timestamp.now().strftime("%Y-%m-%d")
         start = (pd.Timestamp.now() - pd.DateOffset(years=cfg.lookback_years)).strftime("%Y-%m-%d")
-        return get_pit_universe_tickers(start, end, fmp_key)
+        tickers = get_pit_universe_tickers(start, end, fmp_key)
     elif cfg.universe_source == "custom":
-        return cfg.custom_tickers
-    return get_sp500_tickers()
+        tickers = cfg.custom_tickers
+    else:
+        tickers = get_sp500_tickers()
+    # Dedupe while preserving order. PIT universe can return the same ticker
+    # twice if it re-entered the index; downstream code treats tickers as unique.
+    return list(dict.fromkeys(tickers))
 
 
 def load_sector_map(tickers: List[str], cache_dir: str = "data") -> Dict[str, str]:

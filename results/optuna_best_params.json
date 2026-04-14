@@ -1,12 +1,12 @@
 {
-  "n_estimators": 1800,
-  "max_depth": 4,
-  "learning_rate": 0.0334076581518528,
-  "num_leaves": 88,
-  "min_child_samples": 140,
-  "subsample": 0.9,
-  "colsample_bytree": 0.3,
-  "reg_alpha": 0.2222016749597932,
-  "reg_lambda": 0.05085805151590612,
-  "min_split_gain": 0.011392283397725926
+  "n_estimators": 700,
+  "max_depth": 7,
+  "learning_rate": 0.02100992430541678,
+  "num_leaves": 92,
+  "min_child_samples": 100,
+  "subsample": 0.7,
+  "colsample_bytree": 0.45,
+  "reg_alpha": 0.004940126648660667,
+  "reg_lambda": 0.06092950624831632,
+  "min_split_gain": 5.187955938702193e-05
 }
