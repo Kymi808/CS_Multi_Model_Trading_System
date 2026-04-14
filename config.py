@@ -222,10 +222,11 @@ class PortfolioConfig:
     # risk in exactly the stress regime where hedging matters most. Universal quality
     # filters (mcap + EY + vol) already block squeeze-risk names.
     short_max_vix: float = 0.0  # 0 = disabled
-    # Sector blacklist for shorts: REMOVED — replaced by universal quality filters
-    # (mcap + profitability + vol). Hardcoded sector preferences are regime-dependent
-    # and not institutional practice. Universal filters achieve the same effect.
-    avoid_short_sectors: List[str] = field(default_factory=list)  # empty = no sector blacklist
+    # Sector blacklist for shorts: Consumer Discretionary added after deep audit v3.
+    # Empirical evidence (Run 15b, n=249 CD shorts over 5y): mean PnL -1.01%, t=-3.20,
+    # losing 4/6 years (2021 -41%, 2022 -105%, 2023 -40%, 2025 -96%). Excess over
+    # overall short mean: -0.86%, t=-2.71. Persistent, not regime-specific.
+    avoid_short_sectors: List[str] = field(default_factory=lambda: ["Consumer Discretionary"])
     # SHORT UNIVERSE QUALITY FILTERS (Citadel-style universal controls)
     # Only short mature, profitable, liquid companies. This blocks the "IonQ pattern"
     # (small-cap unprofitable speculative stocks with breakthrough upside risk)
