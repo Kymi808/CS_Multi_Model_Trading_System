@@ -120,10 +120,22 @@ def cmd_compare(args):
     if sleeve_horizon:
         cfg.features.primary_target_horizon = sleeve_horizon
         cfg.model.retrain_every_days = min(sleeve_horizon, 14)
+        # Ensure the sleeve horizon is in target_horizons so compute_targets()
+        # actually builds fwd_risk_adj_{h}d for it. Default is [1,5,10,21].
+        if sleeve_horizon not in cfg.features.target_horizons:
+            cfg.features.target_horizons = cfg.features.target_horizons + [sleeve_horizon]
+        # Scale purge & embargo with horizon to prevent label-overlap leakage.
+        # Defaults (purge=10, embargo=12) are sized for the 10d primary horizon.
+        # For h>10 we MUST extend or training labels overlap with validation labels'
+        # forward-return windows (Lopez de Prado). For h<10 the defaults are already
+        # sufficient (over-buffered).
+        cfg.model.purge_gap_days = max(10, sleeve_horizon)
+        cfg.model.embargo_days = max(12, int(sleeve_horizon * 1.2))
         cfg.results_dir = os.path.join(cfg.results_dir, f"sleeve_{sleeve_horizon}d")
         cfg.model_dir = os.path.join(cfg.model_dir, f"sleeve_{sleeve_horizon}d")
         logger.info(f"SLEEVE MODE: horizon={sleeve_horizon}d, "
                     f"retrain={cfg.model.retrain_every_days}d, "
+                    f"purge={cfg.model.purge_gap_days}d, embargo={cfg.model.embargo_days}d, "
                     f"results={cfg.results_dir}")
 
     logger.info("Starting multi-model comparison...")
