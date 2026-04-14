@@ -24,6 +24,7 @@ def optimize_hyperparameters(
     save_dir: str = "results",
     parallel_trials: int = 1,
     lightgbm_n_jobs: int = -1,
+    horizon: int = 10,
 ) -> Dict:
     """
     Parallelism model:
@@ -31,6 +32,10 @@ def optimize_hyperparameters(
       - `lightgbm_n_jobs`: OMP threads per LightGBM fit inside each trial
       - Product should approximate physical core count to avoid OMP contention
         (e.g. 4 trials × 2 lgb_threads on an 8-core Mac)
+
+    `horizon` is the forward-return target horizon in trading days. CV splits
+    scale purge and embargo with it to prevent label-overlap leakage. Defaults
+    to 10 which matches the baseline sleeve.
     """
     if isinstance(X.index, pd.MultiIndex):
         dates = sorted(X.index.get_level_values(0).unique())
@@ -45,10 +50,18 @@ def optimize_hyperparameters(
         logger.warning(f"Too few dates ({n_dates}) for optimization. Skipping.")
         return {}
 
-    cv_splits = _make_cv_splits(dates, n_cv_windows, effective_window)
+    # Horizon-aware leakage controls (Lopez de Prado). Defaults (10, 12) are
+    # sized for horizon=10; must scale up for longer horizons or training
+    # labels overlap with validation labels' forward windows.
+    purge = max(10, horizon)
+    embargo = max(12, int(horizon * 1.2))
+
+    cv_splits = _make_cv_splits(dates, n_cv_windows, effective_window,
+                                purge=purge, embargo=embargo)
     if not cv_splits:
         effective_window = max(50, n_dates // 3)
-        cv_splits = _make_cv_splits(dates, n_cv_windows, effective_window)
+        cv_splits = _make_cv_splits(dates, n_cv_windows, effective_window,
+                                    purge=purge, embargo=embargo)
     if not cv_splits:
         logger.warning("No valid CV splits. Skipping optimization.")
         return {}
@@ -56,6 +69,7 @@ def optimize_hyperparameters(
     logger.info(
         f"Optuna: {n_trials} trials, {len(cv_splits)} CV windows, "
         f"{n_dates} dates, train_window={effective_window}, "
+        f"horizon={horizon}d, purge={purge}d, embargo={embargo}d, "
         f"parallel_trials={parallel_trials}, lgb_n_jobs={lightgbm_n_jobs}"
     )
 

@@ -326,6 +326,7 @@ def cmd_compare(args):
             save_dir=cfg.results_dir,
             parallel_trials=getattr(cfg.model, "optuna_parallel_trials", 1),
             lightgbm_n_jobs=getattr(cfg.model, "lightgbm_n_jobs", -1),
+            horizon=cfg.features.primary_target_horizon,
         )
         if best_params:
             cfg.model = apply_optuna_params(cfg.model, best_params)
