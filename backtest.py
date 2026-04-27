@@ -24,7 +24,7 @@ from fundamental_features import build_fundamental_features
 from cross_asset_features import build_cross_asset_features
 from sentiment_features import fetch_news_sentiment, build_sentiment_features
 from features import build_all_features, panel_to_ml_format
-from model import EnsembleRanker, walk_forward_train, create_model
+from model import walk_forward_train
 from risk_model import FactorRiskModel
 from portfolio import (
     PortfolioConstructor, compute_portfolio_returns, compute_performance_metrics,
@@ -480,16 +480,16 @@ def run_backtest(cfg: Config, optimize: bool = False) -> Tuple[pd.DataFrame, dic
     # Factor risk
     if "factor_risk" in summary:
         fr = summary["factor_risk"]
-        print(f"\nFactor Risk Decomposition:")
+        print("\nFactor Risk Decomposition:")
         print(f"  Total Vol:    {fr.get('total_vol', 0):.1%}")
         print(f"  Factor Vol:   {fr.get('factor_vol', 0):.1%}")
         print(f"  Specific Vol: {fr.get('specific_vol', 0):.1%}")
         if "factor_exposures" in fr:
-            print(f"  Factor Exposures:")
+            print("  Factor Exposures:")
             for f, e in fr["factor_exposures"].items():
                 print(f"    {f:>12s}: {e:>+.3f}")
 
-    print(f"\nFeature Selection:")
+    print("\nFeature Selection:")
     print(f"  Total features: {summary.get('n_features_total', '?')}")
     print(f"  Selected:       {summary.get('n_features_selected', '?')}")
 

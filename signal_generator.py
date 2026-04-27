@@ -14,7 +14,7 @@ import logging
 import os
 import json
 import pickle
-from typing import Dict, Tuple, Optional
+from typing import Tuple, Optional
 
 from config import Config
 from data_loader import (
@@ -26,12 +26,11 @@ from fundamental_features import build_fundamental_features
 from cross_asset_features import build_cross_asset_features
 # Sentiment removed from ML model — used only in agent orchestration layer (OpenClaw)
 # where Claude Haiku scores live news at inference time.
-from features import build_all_features, panel_to_ml_format
+from features import build_all_features
 from fmp_features import (
-    fetch_fmp_fundamental_data, fetch_fmp_historical_fundamentals,
-    get_pit_fundamentals, fetch_fmp_fundamentals, build_fmp_features,
+    fetch_fmp_fundamentals, build_fmp_features,
 )
-from fmp_data_provider import build_premium_features, fetch_bulk_fundamentals
+from fmp_data_provider import fetch_bulk_fundamentals
 from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
 from model import EnsembleRanker
 from risk_model import FactorRiskModel

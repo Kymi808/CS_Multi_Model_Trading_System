@@ -38,7 +38,7 @@ FMP_BASE = "https://financialmodelingprep.com/stable"
 
 def _fmp_get(endpoint: str, api_key: str, params: dict = None, timeout: float = 10.0):
     """Make a single FMP /stable/ API call with rate-limit pause."""
-    import httpx, time
+    import httpx
     if params is None:
         params = {}
     params["apikey"] = api_key

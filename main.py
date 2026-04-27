@@ -15,14 +15,15 @@ Usage:
     python main.py trade                   # Paper trade via Alpaca
     python main.py trade --live            # LIVE (careful!)
 """
-import sys
 import os
 import logging
 import argparse
 from datetime import datetime
 
+LOG_DIR = os.environ.get("CS_LOG_DIR", "logs")
+
 # Create directories BEFORE logging setup
-for _d in ["data", "models", "logs", "results"]:
+for _d in ["data", "models", LOG_DIR, "results"]:
     os.makedirs(_d, exist_ok=True)
 
 logging.basicConfig(
@@ -30,7 +31,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(f"logs/trading_{datetime.now():%Y%m%d_%H%M%S}.log"),
+        logging.FileHandler(
+            os.path.join(LOG_DIR, f"trading_{datetime.now():%Y%m%d_%H%M%S}.log")
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -96,11 +99,9 @@ def cmd_compare(args):
     # Sentiment removed from ML model — used only in agent layer (OpenClaw)
     from features import build_all_features, panel_to_ml_format
     from fmp_features import (
-        fetch_fmp_fundamental_data, fetch_fmp_historical_fundamentals,
+        fetch_fmp_historical_fundamentals,
         get_pit_fundamentals, fetch_fmp_fundamentals, build_fmp_features,
     )
-    from openbb_features import fetch_options_data, fetch_short_interest, build_openbb_features
-    from backtest import select_features_by_ic
     from model_comparison import (
         run_comparison, print_comparison, save_comparison,
         generate_comparison_plots,
@@ -570,7 +571,7 @@ def cmd_trade(args):
                 stock_returns=stock_returns,
                 factor_exposures=factor_exposures,
             )
-            print(f"\nFactor Attribution:")
+            print("\nFactor Attribution:")
             print(f"  Alpha:    {attr.alpha_return:+.4%}")
             for factor, contrib in attr.factor_contributions.items():
                 print(f"  {factor:<12s} {contrib:+.4%}")
@@ -599,7 +600,6 @@ def generate_plots_named(results: "pd.DataFrame", summary: dict, name: str, resu
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     import numpy as np
-    import pandas as pd
 
     fig, axes = plt.subplots(5, 1, figsize=(14, 20), dpi=100)
 
@@ -804,7 +804,7 @@ def main():
     trade.add_argument("--n-short", type=int)
 
     # --- stress ---
-    stress = sub.add_parser("stress", help="Run stress test scenarios")
+    sub.add_parser("stress", help="Run stress test scenarios")
 
     # --- bear-2022 ---
     bear = sub.add_parser("bear-2022", help="Run 2022 bear market backtest")
@@ -837,5 +837,4 @@ def main():
 
 if __name__ == "__main__":
     import pandas as pd
-    import numpy as np
     main()

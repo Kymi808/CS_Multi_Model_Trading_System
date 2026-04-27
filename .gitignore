@@ -2,18 +2,25 @@
 /.venv
 /.vscode
 __pycache__/
-/data/*
-/logs
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+/logs/
+*.log
 *.key
 *.pptx
 .env
 
-# Keep cache files for Colab runs (historical market data — reproducible from FMP)
-!/data/prices_586.csv
-!/data/volumes_586.csv
-!/data/cross_asset.csv
-!/data/sectors.json
-!/data/earnings_dates.json
-!/data/sp500_pit_constituents.json
-!/data/fmp_historical_quarterly.json
-!/data/fmp_fundamentals_hist.json
+# Generated market-data caches and local DBs
+/data/*
+*.db
+*.db-*
+
+# Generated research outputs. Keep headline model artifacts in /models instead.
+/results/*
+/models/sleeve_*/
+
+# Allow docs/placeholders if added later.
+!/data/.gitkeep
+!/results/.gitkeep

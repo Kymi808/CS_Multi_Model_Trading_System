@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# CrossMamba and TST training. Install the CPU/GPU build appropriate for the
+# runner before installing this file when you need deterministic Torch wheels.
+torch>=2.0.0,<2.6.0
+
+# Optional: mamba-ssm and causal-conv1d can accelerate CrossMamba on Linux CUDA.
+# They are intentionally not installed by default because they are platform
+# specific and unnecessary for OpenClaw's LightGBM inference contract.

@@ -35,7 +35,8 @@ MAX_WORKERS = 3
 
 
 def _fmp_get(endpoint: str, api_key: str, params: dict = None, timeout: float = 15.0):
-    import httpx, time
+    import httpx
+    import time
     params = params or {}
     params["apikey"] = api_key
     time.sleep(0.15)  # ~6 req/s to stay under 750/min
@@ -138,7 +139,6 @@ def fetch_bulk_fundamentals(
         except Exception:
             pass
 
-    import httpx
     fundamentals = {}
     ticker_set = set(tickers)
 
@@ -586,7 +586,6 @@ def fetch_claude_sentiment(
         except Exception:
             pass
 
-    import httpx
 
     # Step 1: Fetch news for all tickers (batch by 5 tickers per call)
     logger.info(f"Fetching FMP news for {len(tickers)} tickers...")

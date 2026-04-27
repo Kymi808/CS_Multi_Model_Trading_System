@@ -124,7 +124,6 @@ def advanced_features(prices: pd.DataFrame, volumes: pd.DataFrame, cfg: FeatureC
     # 4. Return acceleration (second derivative of price)
     # Positive = momentum increasing, negative = momentum fading
     mom_21 = lr.rolling(21).sum()
-    mom_63 = lr.rolling(63).sum()
     accel = mom_21 - mom_21.shift(21)
     feats["return_accel_21d"] = accel
     feats["cs_return_accel"] = accel.rank(axis=1, pct=True)

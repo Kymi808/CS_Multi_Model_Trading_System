@@ -16,7 +16,7 @@ import os
 import glob
 import logging
 import argparse
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pandas as pd
 import numpy as np
@@ -115,7 +115,7 @@ def run_tracker(horizon: int = 10):
     rolling_ic = df["ic"].rolling(IC_ROLLING_WINDOW, min_periods=5).mean()
 
     print(f"\n{'='*60}")
-    print(f"PREDICTION ACCURACY TRACKER")
+    print("PREDICTION ACCURACY TRACKER")
     print(f"{'='*60}")
     print(f"  Predictions scored:  {len(df)}")
     print(f"  Horizon:             {horizon} trading days")
@@ -134,7 +134,7 @@ def run_tracker(horizon: int = 10):
         else:
             print(f"\n  Model signal healthy (IC > {IC_DECAY_THRESHOLD})")
 
-    print(f"\nRecent ICs:")
+    print("\nRecent ICs:")
     for _, row in df.tail(10).iterrows():
         ic_val = row["ic"]
         bar = "+" * int(max(0, ic_val) * 100) if ic_val > 0 else "-" * int(abs(ic_val) * 100)

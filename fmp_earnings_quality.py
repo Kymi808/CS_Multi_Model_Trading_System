@@ -208,7 +208,6 @@ def build_earnings_quality_features(
     accruals_df = pd.DataFrame(np.nan, index=dates, columns=tickers)
     asset_growth_df = pd.DataFrame(np.nan, index=dates, columns=tickers)
     shareholder_yield_df = pd.DataFrame(np.nan, index=dates, columns=tickers)
-    gross_profit_trend_df = pd.DataFrame(np.nan, index=dates, columns=tickers)
 
     for ticker in tickers:
         if ticker not in raw_data:
@@ -226,7 +225,6 @@ def build_earnings_quality_features(
         accruals_series = []
         asset_growth_series = []
         shareholder_yield_series = []
-        filing_dates = []
 
         for i, row in df.iterrows():
             fd = row["filingDate"]
@@ -234,8 +232,6 @@ def build_earnings_quality_features(
             ocf = row.get("operating_cash_flow")
             ta = row.get("total_assets")
             shares = row.get("shares_out")
-            divs = row.get("dividends_paid")  # negative
-            buybacks = row.get("stock_repurchases")  # negative
 
             # Accruals: (net_income - operating_cash_flow) / total_assets
             if ni is not None and ocf is not None and ta is not None and ta > 0:

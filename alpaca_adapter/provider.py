@@ -11,7 +11,7 @@ All methods are async and include retry/rate-limit resilience.
 """
 import asyncio
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 import logging

@@ -19,8 +19,7 @@ Design decisions:
 import json
 import os
 import hashlib
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import datetime, timezone
 
 import httpx
 

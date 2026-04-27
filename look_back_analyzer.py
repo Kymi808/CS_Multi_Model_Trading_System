@@ -30,11 +30,9 @@ this way uses the test set as validation. Mitigate by:
 - Tracking the haircut for multiple testing (Bonferroni or PSR)
 """
 import os
-import json
-import sys
 import argparse
 import logging
-from typing import Optional, Callable, List, Dict, Any
+from typing import Optional, Callable, List, Dict
 import pandas as pd
 import numpy as np
 
@@ -160,7 +158,6 @@ class LookBackAnalyzer:
         for c in feature_cols:
             bad_mean = bad_subset[c].mean()
             good_mean = good_subset[c].mean()
-            bad_std = bad_subset[c].std()
             if pd.notna(bad_mean) and pd.notna(good_mean):
                 # Z-score of difference (rough)
                 std_combined = (bad_subset[c].std() + good_subset[c].std()) / 2

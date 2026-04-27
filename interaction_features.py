@@ -17,7 +17,6 @@ References:
 - Jegadeesh & Titman (1993), "Returns to Buying Winners and Selling Losers"
 """
 import pandas as pd
-import numpy as np
 import logging
 from typing import Dict, Optional
 

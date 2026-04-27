@@ -190,7 +190,6 @@ def _build_sector_momentum_features(
 
     # Sector rotation signal: is this stock's sector gaining vs losing momentum?
     if len(windows) >= 2:
-        short_w, long_w = windows[0], windows[-1]
         for etf in sector_etf_prices.columns:
             if etf in sector_ret.columns:
                 pass  # Could add more here

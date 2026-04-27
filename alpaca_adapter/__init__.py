@@ -143,7 +143,6 @@ def fetch_cross_asset_data(
 
     # Map requested tickers to ETF equivalents
     etf_map = {}
-    unmapped = []
     for t in tickers:
         if t in CROSS_ASSET_MAP:
             etf_map[t] = CROSS_ASSET_MAP[t]

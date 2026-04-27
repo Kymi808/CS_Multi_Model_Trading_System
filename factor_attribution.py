@@ -21,8 +21,8 @@ Reference: Grinold & Kahn, "Active Portfolio Management", Chapter 14
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Optional, Tuple
-from dataclasses import dataclass, field
+from typing import Dict
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

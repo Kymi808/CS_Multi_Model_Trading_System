@@ -18,8 +18,6 @@ blows up in a bear market is worthless.
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Optional
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 

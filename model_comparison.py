@@ -449,7 +449,6 @@ def run_single_model_pipeline(
 
     # Long vs short attribution
     if "gross_return" in results_df.columns and "net_exposure" in results_df.columns:
-        net_rets = results_df["net_return"]
         gross_exp = results_df["gross_exposure"]
         net_exp = results_df["net_exposure"]
         # Approximate: long_weight ≈ (gross + net) / 2, short_weight ≈ (gross - net) / 2
@@ -617,7 +616,7 @@ def run_comparison(
     # Ensemble
     if cfg.comparison.run_ensemble and len(all_predictions) > 1:
         logger.info(f"\n{'#'*60}")
-        logger.info(f"# ENSEMBLE (weighted average)")
+        logger.info("# ENSEMBLE (weighted average)")
         logger.info(f"{'#'*60}")
 
         ensemble_preds = build_ensemble_predictions(

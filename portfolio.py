@@ -17,7 +17,7 @@ Key changes from prior version:
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 from config import PortfolioConfig
 
 logger = logging.getLogger(__name__)
@@ -190,9 +190,6 @@ class PortfolioConstructor:
             short_eligible -= set(self._short_blacklist.keys())
 
         # Long side: uses long_eligible pool (momentum cap applied); short side: short_eligible.
-        predictions_long = predictions[predictions.index.isin(long_eligible)]
-        predictions_short = predictions[predictions.index.isin(short_eligible)]
-
         # 1. Cross-sectional rank (0 to 1) — use full universe for long ranking context
         ranks = predictions.rank(pct=True)
 

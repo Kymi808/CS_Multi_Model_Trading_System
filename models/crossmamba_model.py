@@ -109,9 +109,6 @@ class SelectiveSSM(nn.Module):
         1. Vectorized parallel scan (PyTorch, GPU-optimized, no extra deps)
         2. Sequential fallback (CPU, always works)
         """
-        batch, seq_len, d_model = x.shape
-        d_state = self.d_state
-
         if x.is_cuda:
             return self._parallel_scan(x, A, B, C, delta)
         else:
@@ -131,8 +128,7 @@ class SelectiveSSM(nn.Module):
         For seq_len=21, this does 5 parallel steps instead of 21 sequential steps.
         Combined with torch.compile, this is 10-20x faster than the Python loop.
         """
-        batch, seq_len, d_model = x.shape
-        d_state = self.d_state
+        batch, seq_len, _d_model = x.shape
 
         # Pre-compute all discretized parameters at once
         dt = delta  # (B, L, 1)
@@ -424,7 +420,7 @@ class CrossMambaRanker:
             if self.device.type == "cuda":
                 try:
                     model = torch.compile(model, mode="reduce-overhead")
-                    logger.info(f"  CrossMamba compiled with torch.compile")
+                    logger.info("  CrossMamba compiled with torch.compile")
                 except Exception:
                     pass
 

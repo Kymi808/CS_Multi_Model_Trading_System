@@ -102,6 +102,23 @@ Three variants (configurable via `config.py`):
 
 ## Usage
 
+Fresh setup:
+
+```bash
+git clone https://github.com/Kymi808/CS_Multi_Model_Trading_System.git
+cd CS_Multi_Model_Trading_System
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+For development checks, install `requirements-dev.txt`. For CrossMamba/TST
+retraining, install `requirements-training.txt`; the base runtime omits Torch so
+Docker and OpenClaw inference stay lean.
+
+Standalone research and signal commands:
+
 ```bash
 python main.py compare                          # all models + ensemble
 python main.py compare --models crossmamba      # single model
@@ -110,6 +127,23 @@ python retrain.py --models crossmamba,lightgbm  # production retrain
 python main.py signal                           # today's signals
 python main.py trade                            # paper trade
 ```
+
+OpenClaw integration:
+
+```bash
+export CS_SYSTEM_PATH=/absolute/path/to/CS_Multi_Model_Trading_System
+python tests/smoke_openclaw_contract.py
+```
+
+For Dockerized scheduled trading, mount this repo read-only from `openclaw-fintech`:
+
+```bash
+CS_SYSTEM_PATH_HOST=/absolute/path/to/CS_Multi_Model_Trading_System \
+  docker compose -f docker-compose.yml -f docker-compose.models.yml \
+  up -d --build trading-scheduler
+```
+
+See `HANDOFF.md` for the release checklist and duo-repo operating contract.
 
 ## Automated Retraining
 

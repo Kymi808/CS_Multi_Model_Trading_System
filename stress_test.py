@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -230,13 +230,11 @@ def _correlation_crisis(scenario, weights, prices, equity, returns):
 def _vix_spike(scenario, weights, equity, risk_config, returns):
     """VIX to 80: massive vol scaling reduction."""
     vix_target = scenario.parameters["vix_target"]
-    vol_mult = scenario.parameters["vol_multiplier"]
 
     target_vol = risk_config.get("target_annual_vol", 0.10)
     vol_floor = risk_config.get("vol_scale_floor", 0.3)
 
     # Implied daily vol at VIX 80: ~5% per day
-    implied_daily_vol = vix_target / np.sqrt(252) / 100
     implied_annual_vol = vix_target / 100
 
     # Vol scale: target / realized, floored
@@ -335,7 +333,7 @@ def _model_failure(scenario, weights, prices, equity):
         )
         n_positions = len(new_weights[new_weights.abs() > 0.001])
         new_gross = float(new_weights.abs().sum())
-    except Exception as e:
+    except Exception:
         n_positions = 0
         new_gross = 0
 

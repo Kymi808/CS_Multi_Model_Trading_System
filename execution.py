@@ -9,9 +9,8 @@ SETUP:
 """
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import List
 import pandas as pd
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +88,6 @@ class AlpacaExecutor:
                 if status in terminal:
                     filled_qty = float(order.filled_qty or 0)
                     filled_price = float(order.filled_avg_price or 0)
-                    requested_qty = float(order.qty or 0) if order.qty else None
-                    requested_notional = float(order.notional or 0) if order.notional else None
                     if status == "filled":
                         logger.info(f"  {order.symbol}: filled {filled_qty} @ ${filled_price:.2f}")
                     elif status in ("canceled", "expired", "rejected"):

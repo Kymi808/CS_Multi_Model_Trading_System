@@ -13,7 +13,7 @@ accurate representation of trade outcomes.
 import numpy as np
 import pandas as pd
 import logging
-from typing import Tuple, Optional
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
 

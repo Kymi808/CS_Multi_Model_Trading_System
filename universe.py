@@ -10,7 +10,7 @@ import logging
 import json
 import os
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 logger = logging.getLogger(__name__)
 

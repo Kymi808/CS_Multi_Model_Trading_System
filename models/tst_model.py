@@ -109,7 +109,6 @@ class TSTRanker:
         For each (date, ticker), gather the previous seq_len days of features.
         """
         if isinstance(X.index, pd.MultiIndex):
-            dates = sorted(X.index.get_level_values(0).unique())
             tickers = X.index.get_level_values(1).unique()
         else:
             # Flat index — treat as single sequence
@@ -123,8 +122,6 @@ class TSTRanker:
 
         # For multi-index: build per-ticker sequences
         seqs_X, seqs_y = [], []
-        date_list = list(dates)
-        date_to_idx = {d: i for i, d in enumerate(date_list)}
 
         for ticker in tickers:
             ticker_mask = X.index.get_level_values(1) == ticker
@@ -196,7 +193,7 @@ class TSTRanker:
             if self.device.type == "cuda":
                 try:
                     model = torch.compile(model, mode="reduce-overhead")
-                    logger.info(f"  TST compiled with torch.compile")
+                    logger.info("  TST compiled with torch.compile")
                 except Exception:
                     pass
 
@@ -316,7 +313,6 @@ class TSTRanker:
         # Build sequences
         if isinstance(X.index, pd.MultiIndex):
             tickers = X.index.get_level_values(1).unique()
-            dates = sorted(X.index.get_level_values(0).unique())
             all_preds = {}
 
             for ticker in tickers:

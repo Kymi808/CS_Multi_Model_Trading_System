@@ -16,7 +16,7 @@ import os
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -188,8 +188,6 @@ def build_insider_pit_features(
     feats = {}
     dates = prices.index
     tickers = list(prices.columns)
-    n_dates = len(dates)
-    n_tickers = len(tickers)
 
     # Daily aggregates - one row per (filingDate, ticker)
     buy_usd_daily = pd.DataFrame(0.0, index=dates, columns=tickers)

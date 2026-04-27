@@ -99,8 +99,10 @@ def optimize_hyperparameters(
                     X_va = X.loc[X.index.get_level_values(0).isin(val_dates)]
                     y_va = y.loc[y.index.isin(X_va.index)]
                 else:
-                    X_tr = X.loc[train_dates]; y_tr = y.loc[train_dates]
-                    X_va = X.loc[val_dates]; y_va = y.loc[val_dates]
+                    X_tr = X.loc[train_dates]
+                    y_tr = y.loc[train_dates]
+                    X_va = X.loc[val_dates]
+                    y_va = y.loc[val_dates]
 
                 if len(X_tr) < 100 or len(X_va) < 50:
                     continue
@@ -165,7 +167,8 @@ def optimize_hyperparameters(
     _print_summary(study)
 
     # Save best params to disk for production retraining (sleeve-specific path)
-    import json, os
+    import json
+    import os
     params_path = os.path.join(save_dir, "optuna_best_params.json")
     os.makedirs(save_dir, exist_ok=True)
     with open(params_path, "w") as f:
@@ -217,7 +220,7 @@ def _print_summary(study):
     print(f"Total trials: {len(trials)}")
     if trials and trials[0].value is not None:
         print(f"Best score:   {trials[0].value:.4f}")
-    print(f"\nTop 5 trials:")
+    print("\nTop 5 trials:")
     for t in trials[:5]:
         ic = t.user_attrs.get("mean_ic")
         ir = t.user_attrs.get("ir")
@@ -226,7 +229,7 @@ def _print_summary(study):
         ir_s = f"{ir:.2f}" if isinstance(ir, (int, float)) else "N/A"
         print(f"  #{t.number:>3d}: score={val:.4f}, IC={ic_s}, IR={ir_s}")
     if trials:
-        print(f"\nBest hyperparameters:")
+        print("\nBest hyperparameters:")
         for k, v in trials[0].params.items():
             print(f"  {k:>25s}: {v:.6f}" if isinstance(v, float) else f"  {k:>25s}: {v}")
     print(f"{'='*60}")

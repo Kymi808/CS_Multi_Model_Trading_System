@@ -9,7 +9,7 @@ Factors: Market, Size, Value, Momentum, Volatility, Quality
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from config import RiskConfig
 
 logger = logging.getLogger(__name__)

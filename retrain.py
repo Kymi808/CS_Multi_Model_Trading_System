@@ -271,7 +271,6 @@ def retrain(models_to_train: list[str] = None):
     logger.info(f"  Selected {len(selected)} features from training data")
 
     # ── Step 5: Train each model ─────────────────────────────────────
-    train_window = cfg.model.train_window_days
     logger.info(f"  Train: {len(X_train)} samples, Val: {len(X_val)} samples")
 
     # Sample weights: uniqueness (Lopez de Prado) × contemporaneous VIX regime weight.
@@ -340,10 +339,10 @@ def retrain(models_to_train: list[str] = None):
 
         if model_name == "lightgbm":
             model = EnsembleRanker(cfg.model)
-            metrics = model.train(X_train, y_train, X_val, y_val, sample_weight=sample_weight)
+            model.train(X_train, y_train, X_val, y_val, sample_weight=sample_weight)
 
             # Save (fix StringDtype for cross-pandas compatibility)
-            save_path = f"models/latest_lightgbm_model.pkl"
+            save_path = "models/latest_lightgbm_model.pkl"
             with open(save_path, "wb") as f:
                 pickle.dump(_fix_for_pickle({
                     "models": model.models,
@@ -364,7 +363,7 @@ def retrain(models_to_train: list[str] = None):
             seq_len = getattr(model_cfg, "sequence_length", 21)
             logger.info(f"  Starting {model_name} training (this may take several minutes)...")
             try:
-                metrics = model.train(X_train, y_train, X_val, y_val)
+                model.train(X_train, y_train, X_val, y_val)
             except Exception as e:
                 logger.error(f"  {model_name} training failed: {e}")
                 logger.info(f"  Skipping {model_name}, LightGBM will be used as fallback")

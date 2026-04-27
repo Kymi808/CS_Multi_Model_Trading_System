@@ -2,7 +2,7 @@
 Generate comprehensive PowerPoint presentation for Multi-Model Trading System results.
 """
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.dml.color import RGBColor
@@ -155,7 +155,7 @@ def add_table(slide, left, top, width, height, data, col_widths=None,
 def add_metric_card(slide, left, top, width, height, label, value,
                     label_color=MED_GRAY, value_color=WHITE,
                     value_size=28, label_size=11, accent_line_color=ACCENT_BLUE):
-    card = add_shape(slide, left, top, width, height, fill_color=BG_CARD)
+    add_shape(slide, left, top, width, height, fill_color=BG_CARD)
     # Accent line at top
     line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left + Inches(0.15),
                                    top + Inches(0.08), width - Inches(0.3), Pt(2.5))

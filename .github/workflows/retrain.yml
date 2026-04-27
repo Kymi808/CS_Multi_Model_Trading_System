@@ -30,8 +30,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install httpx nest_asyncio || true
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.0,<2.6"
+          python -m pip install -r requirements-training.txt
+          python -m pip install httpx nest_asyncio || true
 
       - name: Clear stale cache data
         run: |

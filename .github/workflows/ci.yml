@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    name: Test And Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+
+      - name: Check for tracked secret patterns
+        run: |
+          ! git grep -I -n -E 'sk-ant-api|PK[A-Z0-9]{18,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' -- . ':!:.github/workflows/ci.yml'
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Compile
+        run: python -m compileall *.py alpaca_adapter models tests
+
+      - name: OpenClaw contract smoke test
+        run: python tests/smoke_openclaw_contract.py
+
+      - name: Build image
+        run: docker build -t cs-multi-model:ci .
+
+      - name: Smoke image
+        run: docker run --rm cs-multi-model:ci
